@@ -176,6 +176,59 @@ int test_preserve_thinking_options() {
     return failures;
 }
 
+int test_enable_thinking_options() {
+    const Json base = {
+        {"model", "m"},
+        {"messages", Json::array({Json{{"role", "user"}, {"content", "hello"}}})},
+    };
+    int failures = 0;
+
+    Json kwargs                    = base;
+    kwargs["chat_template_kwargs"] = Json{{"enable_thinking", false}};
+    const GenerationRequest kwargs_request =
+        parse_chat_completion_request(kwargs, default_limits());
+    failures += check(kwargs_request.enable_thinking == false,
+                      "chat_template_kwargs enable_thinking parsed");
+    failures += check(!translate(kwargs_request).options.enable_thinking,
+                      "resolved enable_thinking reached PromptInput");
+
+    Json alias               = base;
+    alias["enable_thinking"] = false;
+    failures +=
+        check(parse_chat_completion_request(alias, default_limits()).enable_thinking == false,
+              "top-level enable_thinking alias parsed");
+
+    Json both               = kwargs;
+    both["enable_thinking"] = false;
+    failures +=
+        check(parse_chat_completion_request(both, default_limits()).enable_thinking == false,
+              "matching enable_thinking values rejected");
+
+    Json mixed                    = base;
+    mixed["chat_template_kwargs"] = Json{{"enable_thinking", false}, {"preserve_thinking", true}};
+    const GenerationRequest mixed_request = parse_chat_completion_request(mixed, default_limits());
+    failures += check(mixed_request.enable_thinking == false && mixed_request.preserve_thinking,
+                      "both chat template options parsed together");
+
+    Json omitted = base;
+    failures += check(
+        !parse_chat_completion_request(omitted, default_limits()).enable_thinking.has_value(),
+        "omitted enable_thinking did not remain unset");
+
+    Json conflict               = kwargs;
+    conflict["enable_thinking"] = true;
+    failures +=
+        check(throws_api([&] { (void)parse_chat_completion_request(conflict, default_limits()); }),
+              "conflicting enable_thinking values accepted");
+
+    Json bad_value                    = base;
+    bad_value["chat_template_kwargs"] = Json{{"enable_thinking", "no"}};
+    failures +=
+        check(throws_api([&] { (void)parse_chat_completion_request(bad_value, default_limits()); }),
+              "non-boolean enable_thinking accepted");
+    return failures;
+}
+
 int test_reasoning_effort() {
     const Json base = {
         {"model", "m"},
@@ -726,6 +779,7 @@ int main() {
     int failures = 0;
     failures += test_parse_string_content();
     failures += test_preserve_thinking_options();
+    failures += test_enable_thinking_options();
     failures += test_reasoning_effort();
     failures += test_parse_parts_and_flatten();
     failures += test_developer_role_mapped();

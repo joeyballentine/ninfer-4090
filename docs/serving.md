@@ -80,7 +80,7 @@ The endpoint supports:
 - `stream_options.include_usage`;
 - function tools, tool choices, assistant tool-call history, and tool-result messages;
 - the top-level `reasoning_effort` field;
-- the `enable_thinking` extension;
+- the `enable_thinking` extension, as a top-level field or `chat_template_kwargs.enable_thinking`;
 - `chat_template_kwargs.preserve_thinking` and the top-level `preserve_thinking` alias.
 
 The request `model` must equal the public model ID: the artifact `identity.model_id` by default, or
@@ -97,8 +97,9 @@ not exposed by the loaded template returns HTTP 400 with code
 For Chat Completions, `reasoning_effort: "none"` disables thinking. `low`, `medium`, and `xhigh`
 select the corresponding template effort when available. The other OpenAI protocol values
 `minimal`, `high`, and `max` are parsed but rejected when the loaded template does not expose them.
-`enable_thinking` controls the same new-turn thinking switch; a contradictory combination with
-`reasoning_effort` returns `conflicting_template_option`.
+`enable_thinking` controls the same new-turn thinking switch, spelled either top-level or as
+`chat_template_kwargs.enable_thinking`; if both are present they must carry the same boolean value.
+A contradictory combination with `reasoning_effort` returns `conflicting_template_option`.
 
 `preserve_thinking` controls whether reasoning from closed assistant turns remains in later
 prompts. It defaults to the server setting, which is off unless `--preserve-thinking` is used. If
@@ -187,6 +188,7 @@ wire response contains typed `output` Items.
 | `metadata` | at most 16 string pairs; keys at most 64 characters and values at most 512 |
 | `reasoning.effort` | `none` disables thinking; `low`, `medium`, or `xhigh` selects an effort exposed by the loaded chat template; `minimal`, `high`, and `max` return `reasoning_effort_not_supported` for the registered templates |
 | `chat_template_kwargs.preserve_thinking` | optional boolean controlling whether closed-turn reasoning remains in reconstructed prompts |
+| `chat_template_kwargs.enable_thinking` | optional boolean controlling the new-turn thinking switch |
 | `preserve_thinking` | top-level alias for the same option; conflicting values are rejected |
 | `text.format` | omitted or `{"type":"text"}` only |
 | `tools` | flat Responses function definitions; see below |
