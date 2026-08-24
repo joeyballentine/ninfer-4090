@@ -529,9 +529,10 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     }
 
     if (plan.features.vision) {
-        constexpr std::uint32_t kFrontendMergedLimit  = 32768;
+        const std::uint32_t frontend_limit =
+            plan.features.vision_max_tokens > 0 ? plan.features.vision_max_tokens : 8192;
         constexpr std::uint32_t kFrontendSegmentLimit = 768 / 2;
-        const std::uint32_t merged = std::min(plan.capacity, kFrontendMergedLimit);
+        const std::uint32_t merged = std::min(plan.capacity, frontend_limit);
         out.vision_encode          = schedule::VisionContext::workspace_capacity_bytes(
             merged, std::min(merged, kFrontendSegmentLimit));
     }
@@ -639,8 +640,9 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->persistent          = persistent_layout(*impl);
     impl->workspace           = build_workspace_plan(*impl);
     if (impl->features.vision) {
-        constexpr std::uint32_t kFrontendMergedLimit = 32768;
-        const std::uint32_t merged = std::min(impl->capacity, kFrontendMergedLimit);
+        const std::uint32_t frontend_limit =
+            impl->features.vision_max_tokens > 0 ? impl->features.vision_max_tokens : 8192;
+        const std::uint32_t merged = std::min(impl->capacity, frontend_limit);
         impl->request_transient_capacity_bytes =
             schedule::VisionContext::output_transient_bytes(merged);
     }
@@ -649,24 +651,13 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
         // each reachable node-topology class. These bounds cover the largest profile installed in
         // each class and the driver/module state materialized while qualifying all definitions.
         if (impl->speculative_backend == SpeculativeBackend::None) {
-#if defined(NINFER_SM86) || defined(NINFER_SM89)
-            impl->graph_allowance_bytes = checked_mul(1024ULL * kMiB, impl->max_concurrency,
+            impl->graph_allowance_bytes = checked_mul(64ULL * kMiB, impl->max_concurrency,
                                                       "ordinary exact-b graph allowance");
-#else
-            impl->graph_allowance_bytes = checked_mul(256ULL * kMiB, impl->max_concurrency,
-                                                      "ordinary exact-b graph allowance");
-#endif
         } else if (impl->speculative_backend == SpeculativeBackend::Mtp) {
-#if defined(NINFER_SM86) || defined(NINFER_SM89)
-            impl->graph_allowance_bytes = checked_mul(1024ULL * kMiB, impl->max_concurrency,
-                                                      "MTP exact-b graph allowance");
-#else
             const std::size_t per_batch_allowance =
-                (impl->draft_window <= 4 ? 416ULL : (impl->draft_window == 5 ? 448ULL : 512ULL)) *
-                kMiB;
+                (impl->draft_window <= 4 ? 256ULL : 320ULL) * kMiB;
             impl->graph_allowance_bytes = checked_mul(per_batch_allowance, impl->max_concurrency,
                                                       "MTP exact-b graph allowance");
-#endif
         } else {
             const auto class_allowance = [&](std::uint32_t batch_size) {
                 const auto profiles =
@@ -688,6 +679,8 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
             }
         }
     }
+
+    impl->enable_prompt_cache = inputs.enable_prompt_cache;
 
     impl->device_reservation_bytes = checked_add(
         checked_add(
@@ -729,10 +722,11 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
                        options.kv_cache == KvCacheStorage::RK4V4E8,
         .kv_e8_lattice = options.kv_cache == KvCacheStorage::RK4V4E8,
         .kv_e8_root    = options.kv_cache == KvCacheStorage::RK2V4E8,
-        .proposal_head  = options.speculative.proposal_head,
-        .features       = qwen3_6::startup_features(options),
-        .use_cuda_graph = options.use_cuda_graph,
-        .device         = options.device,
+        .proposal_head       = options.speculative.proposal_head,
+        .features            = qwen3_6::startup_features(options),
+        .use_cuda_graph      = options.use_cuda_graph,
+        .enable_prompt_cache = options.enable_prompt_cache,
+        .device              = options.device,
     };
     const std::uint32_t logical_pages = page_count(inputs.capacity);
     const std::uint32_t minimum_pages = std::max(logical_pages, inputs.max_concurrency);

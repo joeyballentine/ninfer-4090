@@ -14,16 +14,27 @@ function(ninfer_add_test name)
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/third_party
-    ${PROJECT_SOURCE_DIR}/third_party/utf8proc)
+    ${PROJECT_SOURCE_DIR}/third_party/utf8proc
+    ${NINFER_UI_GEN_DIR})
+  if(TARGET ninfer_ui_assets)
+    add_dependencies(${name} ninfer_ui_assets)
+  endif()
   if(arg_LIBRARIES)
     target_link_libraries(${name} PRIVATE ${arg_LIBRARIES})
   else()
     target_link_libraries(${name} PRIVATE ninfer_core)
   endif()
   if(arg_NEEDS_SOURCE_DIR)
+    file(TO_CMAKE_PATH "${PROJECT_SOURCE_DIR}" NINFER_NORMALIZED_SOURCE_DIR)
+    file(TO_CMAKE_PATH "${Python3_EXECUTABLE}" NINFER_NORMALIZED_PYTHON)
     target_compile_definitions(${name} PRIVATE
-      NINFER_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
-      NINFER_PYTHON_EXECUTABLE="${Python3_EXECUTABLE}")
+      NINFER_SOURCE_DIR="${NINFER_NORMALIZED_SOURCE_DIR}"
+      NINFER_PYTHON_EXECUTABLE="${NINFER_NORMALIZED_PYTHON}")
+  endif()
+  if(WIN32 AND DSTORAGE_DLLS)
+    add_custom_command(TARGET ${name} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DSTORAGE_DLLS} $<TARGET_FILE_DIR:${name}>
+    )
   endif()
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
@@ -81,6 +92,9 @@ ninfer_add_test(ninfer_state_store_test
 ninfer_add_test(ninfer_gdn_replay_records_test
   SOURCES test_gdn_replay_records.cpp
   LIBRARIES ninfer_core)
+ninfer_add_test(ninfer_disk_state_cache_test
+  SOURCES test_disk_state_cache.cpp
+  LIBRARIES ninfer_core ninfer_ops)
 set_tests_properties(
   ninfer_artifact_materialization_test
   ninfer_device_test
@@ -142,6 +156,9 @@ ninfer_add_test(ninfer_openai_schema_test
 ninfer_add_test(ninfer_responses_schema_test
   SOURCES test_responses_schema.cpp
   LIBRARIES ninfer_serve)
+ninfer_add_test(ninfer_serve_metrics_test
+  SOURCES test_serve_metrics.cpp
+  LIBRARIES ninfer_serve)
 ninfer_add_test(ninfer_response_store_test
   SOURCES test_response_store.cpp
   LIBRARIES ninfer_serve)
@@ -156,6 +173,9 @@ ninfer_add_test(ninfer_serve_options_test
   LIBRARIES ninfer_serve)
 ninfer_add_test(ninfer_request_log_test
   SOURCES test_request_log.cpp
+  LIBRARIES ninfer_serve)
+ninfer_add_test(ninfer_serve_ui_test
+  SOURCES test_serve_ui.cpp
   LIBRARIES ninfer_serve)
 ninfer_add_test(ninfer_bench_support_test
   SOURCES test_ninfer_bench_support.cpp
@@ -298,6 +318,8 @@ target_include_directories(ninfer_test_e8_codec PRIVATE
   ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(ninfer_test_e8_codec PRIVATE CUDA::cudart)
 set_target_properties(ninfer_test_e8_codec PROPERTIES CUDA_ARCHITECTURES "89")
+add_test(NAME ninfer_test_e8_codec COMMAND ninfer_test_e8_codec)
+set_tests_properties(ninfer_test_e8_codec PROPERTIES SKIP_RETURN_CODE 77)
 
 # These tests deliberately compile against the exact target's internal contracts; the target does
 # not export impl/ to ordinary consumers.

@@ -103,13 +103,13 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     extern __shared__ __align__(16) std::int8_t dynamic_r_s[];
     std::int8_t* r_s      = DynamicArena ? dynamic_r_s : static_r_s;
     std::int8_t* q_i8     = q_s;
-    float* q_scale_tmp    = reinterpret_cast<float*>(r_s);
     std::int8_t* k_i8     = r_s;
     __nv_bfloat16* q_b16  = reinterpret_cast<__nv_bfloat16*>(q_i8);
     __nv_bfloat16* k_b16  = reinterpret_cast<__nv_bfloat16*>(k_i8);
     std::int8_t* v_i8     = r_s + Bc * D;
     __nv_bfloat16* v_bf16 = reinterpret_cast<__nv_bfloat16*>(r_s + 2 * Bc * D);
     __shared__ __align__(16) __nv_bfloat16 p_s[Br * Bc];
+    float* q_scale_tmp    = reinterpret_cast<float*>(p_s);
     __shared__ float alpha_s[Br];
     __shared__ __align__(16) __half k_scale_s[Bc * Groups];
     __shared__ __align__(16) __half v_scale_s[Bc * Groups];
@@ -260,6 +260,18 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                     float kv0_scaled = kv0 * k_inv;
                     float kv1_scaled = kv1 * k_inv;
                     e8_project_8d_warp(kv0_scaled, kv1_scaled, lane);
+                    // NOTE (correctness hardening of the ported codec): e8_project_8d_warp
+                    // returns the nearest E8 lattice point, which may lie in the D8+0.5
+                    // coset (all coordinates half-integral). The i4/int8 codes can only hold
+                    // integers and no coset bit is stored, so the half is intentionally
+                    // collapsed here by the rintf()+cast below and the D8+0.5 coset is NOT
+                    // reconstructed on decode (reconstructed K == code * ks). This is a
+                    // deliberate half-coset approximation of rk4v4-e8, not an exact E8
+                    // lattice projection, for any vector whose nearest lattice point is
+                    // half-integral. Preserving the exact E8 point would require a per-8-dim
+                    // coset bit in the packed layout (a format change, out of scope here).
+                    // The rk4v4 (non-E8) path below is unaffected. Original design credit:
+                    // UDPSendToFailed/ninfer-4090 (and Don-Chad/ninfer-3090 lineage).
                     int q0 = static_cast<int>(rintf(kv0_scaled));
                     int q1 = static_cast<int>(rintf(kv1_scaled));
                     c0 = static_cast<std::int8_t>(max(-8, min(7, q0)));
@@ -319,71 +331,6 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         }
         __syncthreads();
     }
-
-    for (int i = tid; i < Br * D; i += Threads) { q_i8[i] = 0; }
-    for (int i = tid; i < RowCount * Groups; i += Threads) { q_scale_tmp[i] = 0.0f; }
-    __syncthreads();
-
-    for (int unit = warp; unit < RowCount * Groups; unit += Wc) {
-        const int row = unit / Groups;
-        const int grp = unit - row * Groups;
-        const int d0  = grp * kGqaKvQuantGroup + lane;
-        const int d1  = d0 + 32;
-        int q_head    = 0;
-        int token     = 0;
-        gqa_small_t_tc_row_to_qt<Geometry>(row, TokenTile, kv_head, q_head, token);
-        float x0        = __bfloat162float(q[gqa_q_index<Geometry>(q_head, d0, token)]);
-        float x1        = __bfloat162float(q[gqa_q_index<Geometry>(q_head, d1, token)]);
-        if constexpr (RotateK) {
-            gqa_kv_hadamard64(x0, x1, FullMask);
-        }
-        float amax      = fmaxf(fabsf(x0), fabsf(x1));
-        amax            = warp_max(amax, FullMask);
-        const float qs  = amax > 0.0f ? amax / 127.0f : 0.0f;
-        const float inv = qs > 0.0f ? 1.0f / qs : 0.0f;
-        gqa_small_t_i8_store_swz(q_i8, row, d0, DB16, gqa_kv_quant_code(x0, inv));
-        gqa_small_t_i8_store_swz(q_i8, row, d1, DB16, gqa_kv_quant_code(x1, inv));
-        if (lane == 0) { q_scale_tmp[row * Groups + grp] = qs; }
-    }
-    __syncthreads();
-
-    const int gid = lane >> 2;
-    const int lid = lane & 3;
-
-    const int a_mat    = lane >> 3;
-    const int a_rin    = lane & 7;
-    const int a_rowoff = a_rin + ((a_mat & 1) << 3);
-    const int a_coloff = (a_mat >> 1) << 3;
-    const int b_rin    = lane & 7;
-    const int b_koff   = ((lane >> 3) & 1) << 3;
-
-    float q_scale_r0[Groups];
-    float q_scale_r1[Groups];
-    if (warp < RowTiles) {
-        const int producer_row0 = warp * 16 + gid;
-#pragma unroll
-        for (int g = 0; g < Groups; ++g) {
-            float qs0     = (lid == 0 && producer_row0 < RowCount)
-                                ? q_scale_tmp[producer_row0 * Groups + g]
-                                : 0.0f;
-            float qs1     = (lid == 0 && producer_row0 + 8 < RowCount)
-                                ? q_scale_tmp[(producer_row0 + 8) * Groups + g]
-                                : 0.0f;
-            q_scale_r0[g] = __shfl_sync(FullMask, qs0, gid * 4);
-            q_scale_r1[g] = __shfl_sync(FullMask, qs1, gid * 4);
-        }
-    }
-    __syncthreads();
-
-    float acc[PVNtPerWarp][4];
-#pragma unroll
-    for (int n = 0; n < PVNtPerWarp; ++n) {
-#pragma unroll
-        for (int i = 0; i < 4; ++i) { acc[n][i] = 0.0f; }
-    }
-
-    float m0 = -CUDART_INF_F, m1 = -CUDART_INF_F;
-    float l0 = 0.0f, l1 = 0.0f;
 
     auto issue_kv_tile = [&](int tile_k0, int physical_page) {
         for (int key_l = tid; key_l < Bc; key_l += Threads) {
@@ -455,8 +402,73 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
 
     int physical_page = block_table[first_tile >> kPagedKVPageShift];
     issue_kv_tile(first_tile, physical_page);
+
+    for (int i = tid; i < (Br * D) / 16; i += Threads) {
+        store_vec(reinterpret_cast<int4*>(q_i8) + i, make_int4(0, 0, 0, 0));
+    }
+    for (int i = tid; i < Br * Groups; i += Threads) { q_scale_tmp[i] = 0.0f; }
+
+    for (int unit = warp; unit < RowCount * Groups; unit += Wc) {
+        const int row = unit / Groups;
+        const int grp = unit - row * Groups;
+        const int d0  = grp * kGqaKvQuantGroup + lane;
+        const int d1  = d0 + 32;
+        int q_head    = 0;
+        int token     = 0;
+        gqa_small_t_tc_row_to_qt<Geometry>(row, TokenTile, kv_head, q_head, token);
+        float x0        = __bfloat162float(q[gqa_q_index<Geometry>(q_head, d0, token)]);
+        float x1        = __bfloat162float(q[gqa_q_index<Geometry>(q_head, d1, token)]);
+        if constexpr (RotateK) {
+            gqa_kv_hadamard64(x0, x1, FullMask);
+        }
+        float amax      = fmaxf(fabsf(x0), fabsf(x1));
+        amax            = warp_max(amax, FullMask);
+        const float qs  = amax > 0.0f ? amax / 127.0f : 0.0f;
+        const float inv = qs > 0.0f ? 1.0f / qs : 0.0f;
+        gqa_small_t_i8_store_swz(q_i8, row, d0, DB16, gqa_kv_quant_code(x0, inv));
+        gqa_small_t_i8_store_swz(q_i8, row, d1, DB16, gqa_kv_quant_code(x1, inv));
+        if (lane == 0) { q_scale_tmp[row * Groups + grp] = qs; }
+    }
+
     ninfer::ops::cp_wait<0>();
     __syncthreads();
+
+    const int gid = lane >> 2;
+    const int lid = lane & 3;
+
+    const int a_mat    = lane >> 3;
+    const int a_rin    = lane & 7;
+    const int a_rowoff = a_rin + ((a_mat & 1) << 3);
+    const int a_coloff = (a_mat >> 1) << 3;
+    const int b_rin    = lane & 7;
+    const int b_koff   = ((lane >> 3) & 1) << 3;
+
+    float q_scale_r0[Groups];
+    float q_scale_r1[Groups];
+    if (warp < RowTiles) {
+        const int producer_row0 = warp * 16 + gid;
+#pragma unroll
+        for (int g = 0; g < Groups; ++g) {
+            float qs0     = (lid == 0 && producer_row0 < RowCount)
+                                ? q_scale_tmp[producer_row0 * Groups + g]
+                                : 0.0f;
+            float qs1     = (lid == 0 && producer_row0 + 8 < RowCount)
+                                ? q_scale_tmp[(producer_row0 + 8) * Groups + g]
+                                : 0.0f;
+            q_scale_r0[g] = __shfl_sync(FullMask, qs0, gid * 4);
+            q_scale_r1[g] = __shfl_sync(FullMask, qs1, gid * 4);
+        }
+    }
+
+    float acc[PVNtPerWarp][4];
+#pragma unroll
+    for (int n = 0; n < PVNtPerWarp; ++n) {
+#pragma unroll
+        for (int i = 0; i < 4; ++i) { acc[n][i] = 0.0f; }
+    }
+
+    float m0 = -CUDART_INF_F, m1 = -CUDART_INF_F;
+    float l0 = 0.0f, l1 = 0.0f;
 
     for (int kb = 0; kb < key_blocks; ++kb) {
         const int k0 = first_tile + kb * Bc;

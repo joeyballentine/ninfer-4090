@@ -32,12 +32,14 @@ std::optional<bool> parse_openai_enable_thinking(const nlohmann::json& body);
 std::string make_chat_completion_response(const std::string& id, const std::string& model,
                                           std::int64_t created, const std::string& content,
                                           const std::string& reasoning, const char* finish_reason,
-                                          const CompletionUsage& usage);
+                                          const CompletionUsage& usage,
+                                          const std::optional<CompletionTimings>& timings = std::nullopt);
 std::string make_chat_completion_tool_response(const std::string& id, const std::string& model,
                                                std::int64_t created, const std::string& content,
                                                const std::string& reasoning,
                                                const std::vector<ToolCall>& tool_calls,
-                                               const CompletionUsage& usage);
+                                               const CompletionUsage& usage,
+                                               const std::optional<CompletionTimings>& timings = std::nullopt);
 
 // Streaming SSE event strings ("data: {...}\n\n"). The first chunk carries the
 // assistant role; reasoning chunks carry `reasoning_content` deltas (the <think>
@@ -50,25 +52,36 @@ std::string make_chat_chunk_role(const std::string& id, const std::string& model
                                  std::int64_t created, bool include_usage);
 std::string make_chat_chunk_reasoning(const std::string& id, const std::string& model,
                                       std::int64_t created, const std::string& delta_text,
-                                      bool include_usage);
+                                      bool include_usage,
+                                      const std::optional<CompletionTimings>& timings = std::nullopt);
 std::string make_chat_chunk_content(const std::string& id, const std::string& model,
                                     std::int64_t created, const std::string& delta_text,
-                                    bool include_usage);
+                                    bool include_usage,
+                                    const std::optional<CompletionTimings>& timings = std::nullopt);
 std::string make_chat_chunk_tool_calls(const std::string& id, const std::string& model,
                                        std::int64_t created,
                                        const std::vector<ToolCall>& tool_calls, bool include_usage);
 std::string make_chat_chunk_final(const std::string& id, const std::string& model,
                                   std::int64_t created, const char* finish_reason,
-                                  bool include_usage);
+                                  bool include_usage,
+                                  const std::optional<CompletionTimings>& timings = std::nullopt);
 // Dedicated usage chunk: `choices: []` with the request's token usage. Emitted
 // only when stream_options.include_usage is true.
 std::string make_chat_chunk_usage(const std::string& id, const std::string& model,
-                                  std::int64_t created, const CompletionUsage& usage);
+                                  std::int64_t created, const CompletionUsage& usage,
+                                  const std::optional<CompletionTimings>& timings = std::nullopt);
 std::string sse_done();
+std::string sse_ping();
 
-// /v1/models payloads.
-std::string make_models_list(const std::string& model_id, std::int64_t created);
-std::string make_model_object(const std::string& model_id, std::int64_t created);
+// /v1/models payloads. `context_window` is the serving max-context, reported
+// so clients can size prompts without a llama.cpp /props or vLLM
+// max_model_len to read. `modalities` mirrors the llama.cpp /props shape so
+// clients can tell a vision-enabled server from a text-only one behind the
+// same model id; a server without the field is read as text-only.
+std::string make_models_list(const std::string& model_id, std::int64_t created,
+                             std::uint32_t context_window, bool vision);
+std::string make_model_object(const std::string& model_id, std::int64_t created,
+                              std::uint32_t context_window, bool vision);
 
 // Error object body.
 std::string make_error_body(const ApiError& error);

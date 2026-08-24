@@ -442,6 +442,45 @@ int test_reasoning_effort_chat_template() {
                       .text.find("old thought") == std::string::npos,
               "explicit preserve_thinking=false did not remove prior thinking");
 
+    // Test client sending thinking inside content with reasoning_effort active (e.g. VS Code / OpenAI clients)
+    fi::ChatMessage embedded_thinking = chat_message(
+        "assistant", "<think>\nembedded model thought\n</think>\n\nactual assistant answer");
+    fi::ChatRenderOptions effort_low;
+    effort_low.reasoning_effort      = ninfer::ReasoningEffort::Low;
+    effort_low.add_generation_prompt = true;
+    effort_low.preserve_thinking     = true;
+
+    const std::string turn2_rendered =
+        reasoning_effort_template()
+            .render({chat_message("user", "q1"), embedded_thinking, chat_message("user", "q2")},
+                    effort_low)
+            .text;
+
+    // Must NOT contain duplicate empty <think>\n\n</think>\n\n tags
+    failures += check(turn2_rendered.find("<think>\n\n</think>\n\n<think>") == std::string::npos,
+                      "effort template inserted duplicate/empty think tags before embedded thinking");
+
+    // Must cleanly format previous assistant turn with exact thinking preservation
+    failures += check(turn2_rendered.find("<|im_start|>assistant\n<think>\nembedded model thought\n"
+                                          "</think>\n\nactual assistant answer<|im_end|>\n") !=
+                          std::string::npos,
+                      "embedded thinking inside content was not properly extracted and preserved");
+
+    // Turn 1 generation output simulation: verify exact prefix equivalence for 100% cache hits
+    fi::ChatRenderOptions turn1_opts;
+    turn1_opts.reasoning_effort      = ninfer::ReasoningEffort::Low;
+    turn1_opts.add_generation_prompt = true;
+    const std::string turn1_rendered =
+        reasoning_effort_template().render({chat_message("user", "q1")}, turn1_opts).text;
+
+    const std::string simulated_turn1_full_stream =
+        turn1_rendered + "embedded model thought\n</think>\n\nactual assistant answer<|im_end|>\n";
+
+    // Turn 2 prefix up to the second user query must be bit-for-bit identical to Turn 1 + output!
+    failures += check(
+        turn2_rendered.starts_with(simulated_turn1_full_stream),
+        "Turn 2 rendered prompt does not share exact prefix with Turn 1 full stream; cache prefix broken!");
+
     fi::ChatMessage empty_arguments = chat_message("assistant", "");
     empty_arguments.tool_calls.push_back({.id = "", .name = "f", .arguments_json = ""});
     failures += check(reasoning_effort_template()
@@ -657,6 +696,7 @@ int test_cross_round_stop(const Frontend& frontend) {
     const auto first = session.commit_preview();
     failures += check(channel_text(first, ninfer::OutputChannel::Content) == "hello",
                       "cross-round stop did not retain the ambiguous suffix");
+    failures += check(first.size() == 1 && first[0].tokens == 1, "first delta tokens count should be 1");
 
     const auto second_decision =
         session.preview(std::array<ninfer::TokenId, 1>{2}, 1, ninfer::FinishReason::OutputLimit);
@@ -802,24 +842,112 @@ int test_disabled_vision() {
     return failures;
 }
 
+int test_speculative_output_token_count(const Frontend& frontend) {
+    auto prompt = frontend.prepare_tokens({0});
+    ninfer::StopPolicy stop;
+    auto session = frontend.make_output_session(prompt, stop);
+
+    const auto decision =
+        session.preview(std::array<ninfer::TokenId, 2>{1, 1}, 4, ninfer::FinishReason::OutputLimit);
+    int failures = check(decision.accepted_tokens == 2, "accepted 2 speculative tokens");
+    const auto output = session.commit_preview();
+    failures += check(output.size() == 1, "emitted one merged delta");
+    failures += check(output[0].tokens == 2, "delta token count matches 2 accepted speculative tokens");
+    return failures;
+}
+
+int test_high_resolution_image_resizing_and_budget() {
+    int failures = 0;
+    const FrontendResources owned = resources();
+
+    auto make_solid_ppm = [](int width, int height) {
+        std::vector<std::uint8_t> ppm;
+        const std::string header = "P6\n" + std::to_string(width) + " " + std::to_string(height) + "\n255\n";
+        ppm.insert(ppm.end(), header.begin(), header.end());
+        ppm.resize(ppm.size() + static_cast<std::size_t>(width) * height * 3, 128);
+        return ppm;
+    };
+
+    // 1. Standard 8192 vision max tokens frontend
+    const Frontend std_frontend = FrontendFactory::create_component(owned, true, 8192);
+
+    ninfer::MessagePart image;
+    image.kind              = ninfer::MessagePartKind::Media;
+    image.media.kind        = ninfer::MediaKind::Image;
+    image.media.bytes       = make_solid_ppm(4032, 3024); // 12.2 Megapixels
+    image.media.media_type  = "image/x-portable-pixmap";
+    image.media.source_name = "phone_photo.ppm";
+    ninfer::ChatMessage message;
+    message.role = "user";
+    message.parts.push_back(std::move(image));
+    ninfer::PromptInput input;
+    input.messages.push_back(std::move(message));
+
+    // Must downscale seamlessly without throwing budget errors
+    auto prepared = std_frontend.prepare(std::move(input));
+    const auto& data = FrontendFactory::inspect(prepared);
+    failures += check(data.has_media() && data.vision_items.size() == 1,
+                      "high-res image was not prepared");
+    failures += check(data.prepare.vision_tokens <= 8192,
+                      "high-res image exceeded 8192 vision tokens budget");
+    failures += check(data.prepare.raw_patches <= 8192 * 4,
+                      "high-res image raw patches exceeded 8192 * 4");
+    failures += check(data.prepare.attention_pairs <= static_cast<std::uint64_t>(8192 * 4) * (8192 * 4),
+                      "high-res image attention pairs exceeded budget");
+
+    // 2. Expanded 32000 vision max tokens frontend
+    const Frontend exp_frontend = FrontendFactory::create_component(owned, true, 32000);
+    ninfer::MessagePart exp_image;
+    exp_image.kind              = ninfer::MessagePartKind::Media;
+    exp_image.media.kind        = ninfer::MediaKind::Image;
+    exp_image.media.bytes       = make_solid_ppm(4032, 3024);
+    exp_image.media.media_type  = "image/x-portable-pixmap";
+    exp_image.media.source_name = "phone_photo_exp.ppm";
+    ninfer::ChatMessage exp_message;
+    exp_message.role = "user";
+    exp_message.parts.push_back(std::move(exp_image));
+    ninfer::PromptInput exp_input;
+    exp_input.messages.push_back(std::move(exp_message));
+
+    auto exp_prepared = exp_frontend.prepare(std::move(exp_input));
+    const auto& exp_data = FrontendFactory::inspect(exp_prepared);
+    failures += check(exp_data.has_media() && exp_data.vision_items.size() == 1,
+                      "high-res image was not prepared with expanded budget");
+    failures += check(exp_data.prepare.vision_tokens <= 32000,
+                      "expanded high-res image exceeded 32000 vision tokens budget");
+    failures += check(exp_data.prepare.raw_patches <= 32000 * 4,
+                      "expanded high-res image raw patches exceeded 32000 * 4");
+    failures += check(exp_data.prepare.attention_pairs <= static_cast<std::uint64_t>(32000 * 4) * (32000 * 4),
+                      "expanded high-res image attention pairs exceeded budget");
+
+    return failures;
+}
+
 } // namespace
 
 int main() {
-    const FrontendResources owned = resources();
-    const Frontend frontend       = FrontendFactory::create_component(owned);
-    int failures                  = 0;
-    failures += test_official_tokenizer_merge();
-    failures += test_official_chat_template();
-    failures += test_reasoning_effort_chat_template();
-    failures += test_turn_rewrite_trace();
-    failures += test_official_resource_guards();
-    failures += test_text_and_image_prepare(frontend);
-    failures += test_video_prepare(frontend);
-    failures += test_cross_round_stop(frontend);
-    failures += test_same_token_stop_priority(frontend);
-    failures += test_terminal_flush(frontend);
-    failures += test_reasoning_split(frontend);
-    failures += test_utf8_and_hidden_eos(frontend);
-    failures += test_disabled_vision();
-    return failures == 0 ? 0 : 1;
+    try {
+        const FrontendResources owned = resources();
+        const Frontend frontend       = FrontendFactory::create_component(owned);
+        int failures                  = 0;
+        failures += test_official_tokenizer_merge();
+        failures += test_official_chat_template();
+        failures += test_reasoning_effort_chat_template();
+        failures += test_turn_rewrite_trace();
+        failures += test_official_resource_guards();
+        failures += test_text_and_image_prepare(frontend);
+        failures += test_high_resolution_image_resizing_and_budget();
+        failures += test_video_prepare(frontend);
+        failures += test_cross_round_stop(frontend);
+        failures += test_same_token_stop_priority(frontend);
+        failures += test_terminal_flush(frontend);
+        failures += test_reasoning_split(frontend);
+        failures += test_utf8_and_hidden_eos(frontend);
+        failures += test_disabled_vision();
+        failures += test_speculative_output_token_count(frontend);
+        return failures == 0 ? 0 : 1;
+    } catch (const std::exception& e) {
+        std::cerr << "test_frontend exception: " << e.what() << '\n';
+        return 1;
+    }
 }

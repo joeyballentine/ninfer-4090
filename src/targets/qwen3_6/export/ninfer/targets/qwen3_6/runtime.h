@@ -12,6 +12,7 @@
 
 namespace ninfer {
 struct DeviceContext;
+class DiskStateCache;
 }
 
 namespace ninfer::targets::qwen3_6 {
@@ -170,9 +171,14 @@ public:
                                std::span<const std::uint8_t> cancelled);
     void abort_lane(std::uint32_t lane) noexcept;
     [[nodiscard]] bool has_retained_lane(std::uint32_t lane) const noexcept;
+    [[nodiscard]] std::uint32_t retained_lane_depth(std::uint32_t lane) const noexcept;
     void evict_retained_lane(std::uint32_t lane) noexcept;
     [[nodiscard]] GenerationTimings generation_timings_lane(std::uint32_t lane) const noexcept;
     [[nodiscard]] SpeculativeStats speculative_stats_lane(std::uint32_t lane) const noexcept;
+    void snapshot_lane_to_disk(std::uint32_t lane, DiskStateCache& disk_cache);
+    void snapshot_turn_checkpoint_to_disk(std::uint32_t lane, DiskStateCache& disk_cache);
+    void set_disk_state_cache(DiskStateCache* cache) noexcept;
+    [[nodiscard]] std::string config_signature_slug() const;
 
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
     void reset_memory_peaks() noexcept;

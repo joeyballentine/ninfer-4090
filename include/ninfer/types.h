@@ -82,8 +82,12 @@ struct EngineOptions {
     std::uint32_t prefill_chunk        = 1024;
     KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
-    bool enable_vision  = false;
+    bool enable_vision                 = false;
+    std::uint32_t vision_max_tokens    = 8192;
     bool use_cuda_graph = true;
+    bool enable_prompt_cache               = false;
+    std::filesystem::path prompt_cache_dir = "";          // empty resolves to default user cache dir
+    std::size_t prompt_cache_max_bytes     = 30ULL << 30; // 30 GiB LRU ceiling
     LoadProgress load_progress;
 };
 
@@ -310,6 +314,7 @@ enum class FinishReason : std::uint8_t {
 struct OutputDelta {
     OutputChannel channel = OutputChannel::Content;
     std::string text;
+    std::uint32_t tokens  = 1;
 };
 
 class OutputSink {
@@ -353,6 +358,7 @@ enum class PrefixReusePath : std::uint8_t {
     FullReset,
     AppendAtFrontier,
     RestoreTurnCheckpoint,
+    RestoreDiskCheckpoint,
 };
 
 struct GenerationResult {
@@ -397,6 +403,11 @@ struct MemorySummary {
     std::size_t cuda_graph_allowance_bytes        = 0;
     std::size_t cuda_graph_observed_bytes         = 0;
     std::size_t kv_payload_bytes                  = 0;
+    std::size_t text_kv_bytes                     = 0;
+    std::size_t mtp_kv_bytes                      = 0;
+    std::size_t gdn_state_bytes                   = 0;
+    std::size_t dflash_kv_bytes                   = 0;
+    std::size_t replay_records_bytes              = 0;
 };
 
 // Monotonic execution counters plus one boundary-consistent scheduler snapshot. Consumers derive

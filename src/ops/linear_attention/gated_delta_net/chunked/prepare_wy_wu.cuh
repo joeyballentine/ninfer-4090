@@ -104,14 +104,10 @@ scatter_frag_to_scr(const float frag[8], float* __restrict__ scr_smem, int warp,
     float* Sptr                                  = scr_smem + warp * BC * SCR_STRIDE;
     const int lane_g                             = lane >> 2;
     const int col_2t                             = (lane & 3) << 1;
-    Sptr[lane_g * SCR_STRIDE + col_2t]           = frag[0];
-    Sptr[lane_g * SCR_STRIDE + col_2t + 1]       = frag[1];
-    Sptr[(lane_g + 8) * SCR_STRIDE + col_2t]     = frag[2];
-    Sptr[(lane_g + 8) * SCR_STRIDE + col_2t + 1] = frag[3];
-    Sptr[lane_g * SCR_STRIDE + col_2t + 8]       = frag[4];
-    Sptr[lane_g * SCR_STRIDE + col_2t + 9]       = frag[5];
-    Sptr[(lane_g + 8) * SCR_STRIDE + col_2t + 8] = frag[6];
-    Sptr[(lane_g + 8) * SCR_STRIDE + col_2t + 9] = frag[7];
+    store_vec(&Sptr[lane_g * SCR_STRIDE + col_2t], make_float2(frag[0], frag[1]));
+    store_vec(&Sptr[(lane_g + 8) * SCR_STRIDE + col_2t], make_float2(frag[2], frag[3]));
+    store_vec(&Sptr[lane_g * SCR_STRIDE + col_2t + 8], make_float2(frag[4], frag[5]));
+    store_vec(&Sptr[(lane_g + 8) * SCR_STRIDE + col_2t + 8], make_float2(frag[6], frag[7]));
 }
 
 // 16x16x16 mma: A from raw row-major scratch (stride SCR_STRIDE),
@@ -203,31 +199,46 @@ __device__ __forceinline__ void store_frag_to_M(const float frag[8], int my_w, i
     const int row_g0                = my_w * BC + lane_g;
     const int row_g1                = row_g0 + 8;
     const int col_base              = my_j * BC + 2 * lane_t;
-    M_view.at(row_g0, col_base)     = frag[0];
-    M_view.at(row_g0, col_base + 1) = frag[1];
-    M_view.at(row_g1, col_base)     = frag[2];
-    M_view.at(row_g1, col_base + 1) = frag[3];
-    M_view.at(row_g0, col_base + 8) = frag[4];
-    M_view.at(row_g0, col_base + 9) = frag[5];
-    M_view.at(row_g1, col_base + 8) = frag[6];
-    M_view.at(row_g1, col_base + 9) = frag[7];
+    store_vec(&M_view.at(row_g0, col_base), make_float2(frag[0], frag[1]));
+    store_vec(&M_view.at(row_g1, col_base), make_float2(frag[2], frag[3]));
+    store_vec(&M_view.at(row_g0, col_base + 8), make_float2(frag[4], frag[5]));
+    store_vec(&M_view.at(row_g1, col_base + 8), make_float2(frag[6], frag[7]));
 }
 
 template <int DIAG_BLOCK>
 __device__ __forceinline__ void solve_diag_block(int lane, SmemTile<BT> M_view) {
     constexpr int diag_off = DIAG_BLOCK * BC;
     const int wcol         = lane & 15;
+
+    // Load column `wcol` of the 16x16 block into registers
+    float col_val[BC];
+#pragma unroll
+    for (int r = 0; r < BC; ++r) {
+        col_val[r] = (lane < 16) ? M_view.at(diag_off + r, diag_off + wcol) : 0.0f;
+    }
+
+    // Solve strictly lower triangular forward substitution in registers (zero __syncwarp barriers)
+#pragma unroll
     for (int i = 1; i < BC; ++i) {
-        const int row_i = diag_off + i;
-        const int col   = diag_off + wcol;
-        float sum       = 0.0f;
+        float sum = 0.0f;
 #pragma unroll
         for (int j = 0; j < BC - 1; ++j) {
-            if (j < i) { sum += M_view.at(row_i, diag_off + j) * M_view.at(diag_off + j, col); }
+            if (j < i) {
+                const float M_ij = __shfl_sync(0xffffU, col_val[i], j);
+                sum += M_ij * col_val[j];
+            }
         }
-        __syncwarp();
-        if (lane < 16 && wcol < i) { M_view.at(row_i, col) += sum; }
-        __syncwarp();
+        if (lane < 16 && wcol < i) {
+            col_val[i] += sum;
+        }
+    }
+
+    // Write back solved lower-triangular values to shared memory
+#pragma unroll
+    for (int r = 1; r < BC; ++r) {
+        if (lane < 16 && wcol < r) {
+            M_view.at(diag_off + r, diag_off + wcol) = col_val[r];
+        }
     }
 }
 
@@ -599,9 +610,12 @@ prepare_wy_wu_kernel(const __nv_bfloat16* __restrict__ k_in, const __nv_bfloat16
     __syncthreads();
 
     {
-        constexpr int N = BT * BT;
+        constexpr int N_VEC = (BT * BT) / 4;
+        auto* const t_inv_vec4 = reinterpret_cast<float4*>(T_inv_smem);
 #pragma unroll
-        for (int idx = tid; idx < N; idx += BLOCK_THREADS) T_inv_smem[idx] = 0.0f;
+        for (int idx = tid; idx < N_VEC; idx += BLOCK_THREADS) {
+            t_inv_vec4[idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
     }
     __syncthreads();
 

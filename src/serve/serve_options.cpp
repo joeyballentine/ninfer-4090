@@ -66,38 +66,73 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
 } // namespace
 
 std::string serve_usage_text(const char* argv0) {
-    return std::string("usage: ") + argv0 +
-           " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
-           "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
-           "[--max-pending-requests N] [--pending-timeout-ms N] "
-           "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
-           "[--max-request-mib N] [--request-log-jsonl FILE] "
-           "[--response-store-max-records N] [--response-store-max-mib N] "
-           "[--kv-dtype bf16|int8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] [--spec mtp|dflash --draft-tokens N] "
-           "[--default-max-tokens N] "
-           "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
-           "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
-           "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
-           "[--frequency-penalty F] [--seed N] [--greedy]\n"
-           "       serves OpenAI Responses/Chat Completions and Anthropic Messages endpoints\n"
-           "       --default-max-tokens defaults to " +
-           std::to_string(kDefaultMaxTokens) +
-           " when omitted\n"
-           "       --max-request-mib defaults to 384 and is enforced before JSON parsing\n"
-           "       --request-log-jsonl appends full-precision server/request records\n"
-           "       --model-id overrides the artifact identity.model_id reported by the server\n"
-           "       Responses state is process-local and bounded to 1024 records / 256 MiB by "
-           "default\n"
-           "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
-           "       --vision enables media and loads the fixed Vision GPU allocations\n"
-           "       --kv-capacity auto leaves " +
-           std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
-           " MiB of sizing headroom\n"
-           "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
-           "       --preserve-thinking retains closed-turn assistant reasoning in later prompts\n"
-           "       sampler defaults come from the loaded model and resolved thinking mode; "
-           "server flags and request fields override individual values.\n"
-           "       --greedy forces temperature 0 (exact argmax).\n";
+    const std::string headroom_mib =
+        std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL));
+    const std::string default_max_toks = std::to_string(kDefaultMaxTokens);
+    return std::string("usage: ") + argv0 + " <model.ninfer> [options]\n\n"
+           "High-performance OpenAI Responses/Chat Completions and Anthropic Messages server\n"
+           "for native .ninfer checkpoint artifacts.\n\n"
+           "Server & Network:\n"
+           "  --host <H>                  HTTP listen address (default: 127.0.0.1)\n"
+           "  --port <N>                  HTTP listen port (default: 8080)\n"
+           "  --api-key <KEY>             Bearer token authentication key (optional; auth disabled if omitted)\n"
+           "  --cors                      Enable Cross-Origin Resource Sharing (CORS) headers for web clients\n"
+           "  --ui / --no-ui              Enable or disable the embedded Web UI dashboard (default: enabled)\n"
+           "  --model-id <ID>             Override model identifier in /v1/models (default: artifact identity.model_id)\n"
+           "  --max-request-mib <N>       Maximum incoming request payload size in MiB (default: 384, enforced before parsing)\n"
+           "  --request-log-jsonl <FILE>  Append full-precision server request and telemetry records to JSONL file\n"
+           "  --log-stats-interval-ms <N> Periodic throughput and engine stats logging interval in ms (default: 5000; 0 disables)\n\n"
+           "Concurrency & Ingress:\n"
+           "  --max-concurrency <N>       Maximum active parallel decode slots (1 to 8, default: 1)\n"
+           "  --max-pending-requests <N>  Maximum capacity of incoming request FIFO queue (default: 16)\n"
+           "  --pending-timeout-ms <N>    Queue wait timeout before returning 503 Service Unavailable (default: 30000)\n\n"
+           "Stateful Conversations & Response Store:\n"
+           "  --response-store-max-records <N>  Maximum completed response records in process-local store (default: 1024)\n"
+           "  --response-store-max-mib <N>      Memory budget in MiB for response store records (default: 256)\n\n"
+           "Model & Hardware Configuration:\n"
+           "  --device <N>                CUDA device ordinal (default: 0)\n"
+           "  --max-context <N>           Maximum sequence context length in tokens (prompt + completion, default: 8192)\n"
+           "  --kv-capacity <N|auto>      KV cache capacity in tokens, or 'auto' (allocates available VRAM\n"
+           "                              reserving " + headroom_mib + " MiB headroom; default: matches --max-context)\n"
+           "  --prefill-chunk <N>         Prefill chunk size in tokens (multiple of 128, default: 1024)\n"
+           "  --no-cuda-graph             Disable CUDA Graph capture/replay (executes via standard CUDA streams)\n"
+           "  --no-prefix-reuse           Disable KV prefix cache reuse across requests (prefix reuse enabled by default)\n\n"
+           "Persistent Prompt Cache (DirectStorage DMA):\n"
+           "  --disk-cache / --prompt-cache     Enable persistent multi-turn prompt caching to disk via DirectStorage DMA\n"
+           "  --no-disk-cache                   Disable persistent disk prompt cache (default)\n"
+           "  --disk-cache-dir <DIR>            Directory path for prompt cache (default: %LOCALAPPDATA%/ninfer/cache/<profile>)\n"
+           "  --disk-cache-gb <N>               Disk cache storage quota limit in GiB (default: 30)\n\n"
+           "Quantization & Storage Layouts:\n"
+           "  --kv-dtype <dtype>          KV cache storage data type and quantization layout:\n"
+           "                                bf16       - 16-bit brain floating-point\n"
+           "                                int8       - 8-bit integer channel-quantized\n"
+           "                                rk8v4      - 8-bit rank-compressed K, 4-bit V\n"
+           "                                rk4v4      - 4-bit rank-compressed K, 4-bit V\n"
+           "                                rk4v4-e8   - 4-bit E8 lattice Keys, 4-bit Values\n"
+           "                                rk2v4-e8   - 2-bit E8 lattice Keys, 4-bit Values\n\n"
+           "Speculative Decoding:\n"
+           "  --spec <mtp|dflash>         Speculative execution backend (default: none / autoregressive):\n"
+           "                                mtp        - Multi-Token Prediction draft heads\n"
+           "                                dflash     - Block-parallel draft model (35B-A3B text-only)\n"
+           "  --draft-tokens <N>          Speculative draft tokens per verification round (MTP: 1..5, DFlash: 1..15)\n"
+           "  --lm-head-draft             Reuse base model LM head weights for draft logits projection (requires --spec)\n\n"
+           "Vision & Multimodal:\n"
+           "  --vision                    Enable image/video vision encoder and load Vision GPU allocations\n"
+           "  --vision-max-tokens <N>     Vision scratchpad token capacity (default: 8192)\n\n"
+           "Reasoning & Generation Defaults:\n"
+           "  --default-max-tokens <N>    Default maximum output tokens when omitted in client request (default: " + default_max_toks + ")\n"
+           "  --no-thinking               Disable reasoning/thinking mode globally by default\n"
+           "  --preserve-thinking         Retain closed-turn assistant reasoning in multi-turn conversation history\n"
+           "  --reasoning-effort <effort> Default thinking depth preset (low | medium | xhigh) when omitted by client\n\n"
+           "Sampler Defaults (overridden by client request parameters):\n"
+           "  --temperature <F>           Fallback softmax temperature (0.0 to 2.0)\n"
+           "  --top-p <F>                 Fallback nucleus sampling cumulative probability cutoff (0.0 to 1.0)\n"
+           "  --top-k <N>                 Fallback top-K vocabulary truncation candidate count (0 to INT32_MAX)\n"
+           "  --min-p <F>                 Fallback minimum token probability relative to top token (0.0 to 1.0)\n"
+           "  --presence-penalty <F>      Fallback presence penalty (-2.0 to 2.0)\n"
+           "  --frequency-penalty <F>     Fallback frequency penalty (-2.0 to 2.0)\n"
+           "  --seed <N>                  Fallback 64-bit random seed\n"
+           "  --greedy                    Force greedy argmax sampling (equivalent to --temperature 0)\n";
 }
 
 ServeOptions parse_serve_options(int argc, char** argv) {
@@ -201,18 +236,48 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             default_max_tokens_explicit = true;
         } else if (arg == "--vision") {
             options.enable_vision = true;
+        } else if (arg == "--vision-max-tokens" || arg == "--vision-limit") {
+            const int val = parse_nonnegative_int(require_value(arg.c_str()), "vision-max-tokens");
+            if (val <= 0) {
+                throw std::invalid_argument(std::string(arg) + " must be positive");
+            }
+            options.vision_max_tokens = static_cast<std::uint32_t>(val);
+            options.enable_vision     = true;
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
         } else if (arg == "--no-prefix-reuse") {
             options.allow_prefix_reuse = false;
+        } else if (arg == "--prompt-cache" || arg == "--disk-cache" || arg == "--enable-prompt-cache") {
+            options.enable_prompt_cache = true;
+        } else if (arg == "--no-prompt-cache" || arg == "--no-disk-cache") {
+            options.enable_prompt_cache = false;
+        } else if (arg == "--prompt-cache-dir" || arg == "--disk-cache-dir") {
+            options.prompt_cache_dir    = require_value(arg.c_str());
+            options.enable_prompt_cache = true;
+        } else if (arg == "--prompt-cache-gb" || arg == "--disk-cache-gb") {
+            const std::uint64_t gb = parse_u64(require_value(arg.c_str()), arg.c_str());
+            options.prompt_cache_max_bytes = static_cast<std::size_t>(gb << 30);
+            options.enable_prompt_cache    = true;
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
         } else if (arg == "--no-thinking") {
             options.enable_thinking = false;
         } else if (arg == "--preserve-thinking") {
             options.preserve_thinking = true;
+        } else if (arg == "--reasoning-effort" || arg == "--thinking-effort") {
+            const std::string val = require_value(arg.c_str());
+            const auto effort     = parse_requested_reasoning_effort(val);
+            if (!effort) {
+                throw std::invalid_argument("invalid value for " + arg + ": '" + val +
+                                            "' (expected low, medium, or xhigh)");
+            }
+            options.default_reasoning_effort = *effort;
         } else if (arg == "--cors") {
             options.enable_cors = true;
+        } else if (arg == "--ui") {
+            options.enable_ui = true;
+        } else if (arg == "--no-ui") {
+            options.enable_ui = false;
         } else if (arg == "--temperature") {
             options.sampling_overrides.temperature =
                 parse_float_in(require_value("--temperature"), "temperature", 0.0f, 2.0f);

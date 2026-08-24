@@ -25,6 +25,7 @@ struct RequestLogContext {
     std::string protocol;
     std::string model;
     bool stream                             = false;
+    int prompt_tokens                       = 0;
     std::size_t message_count               = 0;
     int requested_output_tokens             = 0;
     bool requested_output_tokens_client_set = false;
@@ -32,6 +33,7 @@ struct RequestLogContext {
     ToolChoice tool_choice;
     bool has_tool_history                  = false;
     bool enable_thinking                   = true;
+    std::optional<ninfer::ReasoningEffort> reasoning_effort;
     bool preserve_thinking                 = false;
     bool preserve_thinking_semantic_change = false;
     ninfer::ResolvedSamplingParameters sampling;

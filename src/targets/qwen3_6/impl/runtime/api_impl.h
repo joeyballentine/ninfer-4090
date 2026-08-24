@@ -209,6 +209,11 @@ bool Program<Variant>::has_retained_lane(std::uint32_t lane) const noexcept {
 }
 
 template <>
+std::uint32_t Program<Variant>::retained_lane_depth(std::uint32_t lane) const noexcept {
+    return impl_->retained_lane_depth(lane);
+}
+
+template <>
 void Program<Variant>::evict_retained_lane(std::uint32_t lane) noexcept {
     impl_->evict_retained_lane(lane);
 }
@@ -221,6 +226,26 @@ GenerationTimings Program<Variant>::generation_timings_lane(std::uint32_t lane) 
 template <>
 SpeculativeStats Program<Variant>::speculative_stats_lane(std::uint32_t lane) const noexcept {
     return impl_->speculative_stats_lane(lane);
+}
+
+template <>
+void Program<Variant>::snapshot_lane_to_disk(std::uint32_t lane, DiskStateCache& disk_cache) {
+    impl_->snapshot_lane_to_disk(lane, disk_cache);
+}
+
+template <>
+void Program<Variant>::snapshot_turn_checkpoint_to_disk(std::uint32_t lane, DiskStateCache& disk_cache) {
+    impl_->snapshot_turn_checkpoint_to_disk(lane, disk_cache);
+}
+
+template <>
+void Program<Variant>::set_disk_state_cache(DiskStateCache* cache) noexcept {
+    impl_->set_disk_state_cache(cache);
+}
+
+template <>
+std::string Program<Variant>::config_signature_slug() const {
+    return impl_->config_signature_slug();
 }
 
 template <>

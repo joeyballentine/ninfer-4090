@@ -593,13 +593,28 @@ DecoderState terminal_state(DecoderState state) {
 
 class Frontend::Impl {
 public:
-    Impl(const FrontendResources& resources, bool registered_checkpoint, bool vision_enabled_)
+    Impl(const FrontendResources& resources, bool registered_checkpoint, bool vision_enabled_,
+         std::uint32_t vision_max_tokens_)
         : chat_template(compile_chat_template(resources)),
           tokenizer(std::make_shared<const fi::Tokenizer>(
               fi::TokenizerResources{.tokenizer_json         = resources.tokenizer_json,
                                      .tokenizer_config_json  = resources.tokenizer_config_json,
                                      .generation_config_json = resources.generation_config_json})),
           processor(processor_options(resources)), vision_enabled(vision_enabled_) {
+        // The vision encode workspace is sized to vision_max_tokens; keep the processor
+        // budget in lockstep so oversized media fails as MediaBudgetExceeded before it
+        // reaches the encoder, and smart_resize_image downscales high-res media within
+        // the allocated vision token budget.
+        if (vision_max_tokens_ > 0) {
+            processor.max_vision_tokens   = vision_max_tokens_;
+            processor.max_raw_patches     = static_cast<std::uint64_t>(vision_max_tokens_) * (fi::kMerge * fi::kMerge);
+            const std::uint64_t budget_pixels =
+                static_cast<std::uint64_t>(vision_max_tokens_) * (fi::kFactor * fi::kFactor);
+            processor.image_max_pixels    = std::min(processor.image_max_pixels, budget_pixels);
+            processor.video_max_pixels    = std::min(processor.video_max_pixels, budget_pixels);
+            const std::uint64_t max_spatial = processor.max_raw_patches;
+            processor.max_attention_pairs = std::max(processor.max_attention_pairs, max_spatial * max_spatial);
+        }
         if (registered_checkpoint) { validate_registered_tokenizer(*tokenizer); }
         for (const int token : tokenizer->default_stop_token_ids()) {
             if (!tokenizer->is_valid_token(token)) {
@@ -715,6 +730,12 @@ runtime::OutputDecision OutputSession::preview(std::span<const TokenId> tokens,
     impl_->preview_output.clear();
 
     const auto complete = [&](std::uint32_t count, FinishReason reason) {
+        if (impl_->preview_output.size() == 1) {
+            impl_->preview_output[0].tokens = count;
+        } else if (impl_->preview_output.size() == 2) {
+            impl_->preview_output[0].tokens = 1;
+            impl_->preview_output[1].tokens = std::max(1U, count - 1);
+        }
         impl_->preview_ready = true;
         return runtime::OutputDecision{.accepted_tokens = count, .finish_reason = reason};
     };
@@ -806,13 +827,17 @@ Frontend::Frontend(Frontend&&) noexcept            = default;
 Frontend& Frontend::operator=(Frontend&&) noexcept = default;
 Frontend::~Frontend()                              = default;
 
-Frontend make_frontend(const FrontendResources& resources, bool vision_enabled) {
-    return Frontend(std::make_shared<const Frontend::Impl>(resources, true, vision_enabled));
+Frontend make_frontend(const FrontendResources& resources, bool vision_enabled,
+                       std::uint32_t vision_max_tokens) {
+    return Frontend(
+        std::make_shared<const Frontend::Impl>(resources, true, vision_enabled, vision_max_tokens));
 }
 
 Frontend FrontendTestAccess::create_component(const FrontendResources& resources,
-                                              bool vision_enabled) {
-    return Frontend(std::make_shared<const Frontend::Impl>(resources, false, vision_enabled));
+                                              bool vision_enabled,
+                                              std::uint32_t vision_max_tokens) {
+    return Frontend(std::make_shared<const Frontend::Impl>(resources, false, vision_enabled,
+                                                           vision_max_tokens));
 }
 
 const PreparedPromptData& PreparedPromptAccess::view(const PreparedPrompt& prompt) {
@@ -844,7 +869,14 @@ PreparedPrompt Frontend::prepare(PromptInput input) const {
     auto prepared              = std::make_unique<PreparedPromptData>();
     PreparedPromptData& result = *prepared;
     if (has_media) {
-        fi::Processor processor(*impl_->tokenizer, impl_->chat_template, impl_->processor);
+        // The processor's max_prompt_tokens default (32k) is not wired to the
+        // engine's context limit, so leaving it in place rejects any media
+        // request whose conversation is deeper than 32k tokens even when the
+        // context has room. The engine enforces the real context limit later
+        // (ContextLengthExceeded); lift the cap here like count_tokens does.
+        fi::ProcessorOptions processor_options = impl_->processor;
+        processor_options.max_prompt_tokens    = std::numeric_limits<std::size_t>::max();
+        fi::Processor processor(*impl_->tokenizer, impl_->chat_template, processor_options);
         fi::ProcessedInput processed;
         try {
             processed = processor.process(messages, render_options(options));

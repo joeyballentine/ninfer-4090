@@ -21,9 +21,11 @@ add_library(ninfer_core STATIC
   core/arena.cu
   core/device.cu
   core/dtype.cpp
+  core/disk_state_cache.cpp
+  core/direct_storage_engine.cpp
   core/gdn_replay_records.cpp
   core/cyclic_kv_cache.cpp
-  core/paged_kv_cache.cpp
+  core/paged_kv_cache.cu
   core/linear_attention_state.cpp
   core/layout.cpp
   core/tensor.cpp
@@ -35,6 +37,9 @@ add_library(ninfer_core STATIC
 ninfer_internal_includes(ninfer_core)
 ninfer_cuda_archive(ninfer_core)
 target_link_libraries(ninfer_core PUBLIC ${NINFER_CUDART_TARGET} CUDA::nvtx3)
+if(WIN32)
+  target_link_libraries(ninfer_core PUBLIC ninfer_directstorage d3d12 dxgi)
+endif()
 
 # Generic .ninfer framing, binding, and direct final materialization.
 add_library(ninfer_artifact STATIC
@@ -331,10 +336,14 @@ if(NINFER_BUILD_SERVE)
     serve/request_log.cpp
     serve/http_server.cpp
     serve/responses_http.cpp
-    serve/serve_options.cpp)
+    serve/serve_metrics.cpp
+    serve/serve_options.cpp
+    ${NINFER_UI_CPP})
   ninfer_internal_includes(ninfer_serve)
-  target_include_directories(ninfer_serve PRIVATE
-    ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
+  target_include_directories(ninfer_serve
+    PUBLIC ${NINFER_UI_GEN_DIR}
+    PRIVATE ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
+  add_dependencies(ninfer_serve ninfer_ui_assets)
   target_link_libraries(ninfer_serve
     PUBLIC ninfer_engine Threads::Threads
     PRIVATE ninfer_media_acquire ${NINFER_CUDART_TARGET})

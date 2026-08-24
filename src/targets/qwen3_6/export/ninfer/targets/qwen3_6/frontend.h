@@ -70,6 +70,10 @@ public:
 
     [[nodiscard]] const OutputDelta& back() const noexcept { return values_[size_ - 1]; }
 
+    [[nodiscard]] OutputDelta& operator[](std::size_t index) noexcept { return values_[index]; }
+
+    [[nodiscard]] const OutputDelta& operator[](std::size_t index) const noexcept { return values_[index]; }
+
     void clear() noexcept;
     void push_back(OutputDelta value);
 
@@ -127,9 +131,11 @@ private:
     std::shared_ptr<const Impl> impl_;
 
     friend class FrontendTestAccess;
-    friend Frontend make_frontend(const FrontendResources& resources, bool vision_enabled);
+    friend Frontend make_frontend(const FrontendResources& resources, bool vision_enabled,
+                                  std::uint32_t vision_max_tokens);
 };
 
-[[nodiscard]] Frontend make_frontend(const FrontendResources& resources, bool vision_enabled);
+[[nodiscard]] Frontend make_frontend(const FrontendResources& resources, bool vision_enabled,
+                                     std::uint32_t vision_max_tokens = 8192);
 
 } // namespace ninfer::targets::qwen3_6

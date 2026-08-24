@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ninfer/types.h"
+#include "serve/request.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -39,14 +40,20 @@ struct ServeOptions {
     int device                             = 0;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
-    bool enable_vision      = false;
-    bool use_cuda_graph     = true;
+    bool enable_vision                     = false;
+    std::uint32_t vision_max_tokens        = 8192;
+    bool use_cuda_graph                    = true;
     bool allow_prefix_reuse = true;
+    bool enable_prompt_cache               = false;
+    std::string prompt_cache_dir           = "";
+    std::size_t prompt_cache_max_bytes     = 30ULL << 30; // 30 GiB default
     bool enable_thinking =
         true; // default thinking mode for the generation prompt (--no-thinking opts out)
     bool preserve_thinking = false;
+    std::optional<RequestedReasoningEffort> default_reasoning_effort;
     int default_max_tokens = kDefaultMaxTokens;
     bool enable_cors       = false; // send permissive CORS headers for browser UIs
+    bool enable_ui         = true;  // enable built-in WebUI on GET / and static assets (--no-ui disables)
     // Process-level explicit overrides layered between registered model/mode defaults and request
     // fields. An omitted seed is replaced per request with a fresh random seed.
     SamplingOverrides sampling_overrides;
