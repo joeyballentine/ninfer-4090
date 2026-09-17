@@ -46,6 +46,22 @@ int main() {
     failures += check(defaults.kv_capacity.mode == ninfer::KvCapacityMode::Explicit &&
                           defaults.kv_capacity.explicit_tokens == defaults.max_context,
                       "default KV capacity does not follow max context");
+    failures += check(defaults.default_max_tokens == static_cast<int>(defaults.max_context),
+                      "omitted --default-max-tokens does not follow max context");
+    const ServeOptions long_context =
+        parse({"ninfer-serve", "model.ninfer", "--max-context", "131072"});
+    failures += check(long_context.default_max_tokens == 131072,
+                      "omitted --default-max-tokens did not follow an explicit --max-context");
+    const ServeOptions explicit_output_limit = parse(
+        {"ninfer-serve", "model.ninfer", "--max-context", "131072", "--default-max-tokens", "512"});
+    failures += check(explicit_output_limit.default_max_tokens == 512,
+                      "explicit --default-max-tokens was overridden by --max-context");
+    bool non_positive_default_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--default-max-tokens", "0"});
+    } catch (const std::invalid_argument&) { non_positive_default_rejected = true; }
+    failures +=
+        check(non_positive_default_rejected, "explicit --default-max-tokens 0 was not rejected");
     failures += check(defaults.context_cache.host_state_slots == ninfer::kDefaultHostStateSlots &&
                           defaults.context_cache.host_kv_capacity_bytes ==
                               ninfer::kDefaultHostKvCapacityBytes,
@@ -91,8 +107,8 @@ int main() {
     failures += check(!defaults.tolerant_tool_calls,
                       "tolerant tool-call recovery is unexpectedly enabled by default");
     const ServeOptions tolerant = parse({"ninfer-serve", "model.ninfer", "--tolerant-tool-calls"});
-    failures += check(tolerant.tolerant_tool_calls,
-                      "--tolerant-tool-calls did not reach serving options");
+    failures +=
+        check(tolerant.tolerant_tool_calls, "--tolerant-tool-calls did not reach serving options");
     failures += check(defaults.vision_max_tokens == 8192,
                       "the Vision scratchpad token capacity lost its default");
     const ServeOptions vision_tokens =
@@ -107,8 +123,8 @@ int main() {
     failures += check(!defaults.wddm_evictable_budget,
                       "WDDM evictable budgeting is unexpectedly enabled by default");
     const ServeOptions wddm = parse({"ninfer-serve", "model.ninfer", "--wddm-evictable-budget"});
-    failures += check(wddm.wddm_evictable_budget,
-                      "--wddm-evictable-budget did not reach serving options");
+    failures +=
+        check(wddm.wddm_evictable_budget, "--wddm-evictable-budget did not reach serving options");
     failures += check(kv_help.find("--tolerant-tool-calls") != std::string::npos &&
                           kv_help.find("--vision-max-tokens") != std::string::npos &&
                           kv_help.find("--wddm-evictable-budget") != std::string::npos,
@@ -331,6 +347,10 @@ int main() {
     failures += check(serve_usage_text("ninfer-serve").find("--default-thinking-budget") !=
                           std::string::npos,
                       "serve help omits --default-thinking-budget");
+    failures +=
+        check(serve_usage_text("ninfer-serve").find("--default-max-tokens follows --max-context") !=
+                  std::string::npos,
+              "serve help omits the resolved --default-max-tokens default");
     failures += check(serve_usage_text("ninfer-serve").find("--vision") != std::string::npos,
                       "serve help omits --vision");
     failures +=

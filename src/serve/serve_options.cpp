@@ -92,9 +92,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--frequency-penalty F] [--seed N] [--greedy] [--wddm-evictable-budget]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "       serves OpenAI Responses/Chat Completions and Anthropic Messages endpoints\n"
-           "       --default-max-tokens defaults to " +
-           std::to_string(kDefaultMaxTokens) +
-           " when omitted\n"
+           "       --default-max-tokens follows --max-context when omitted\n"
            "       --max-request-mib defaults to 384 and is enforced before JSON parsing\n"
            "       --media-cache-mib defaults to 1024; 0 disables retained media reuse\n"
            "       --media-live-mib defaults to 2048 and bounds all live BF16 patch payloads\n"
@@ -295,11 +293,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--vision") {
             options.enable_vision = true;
         } else if (arg == "--vision-max-tokens") {
-            const int val = parse_nonnegative_int(require_value("--vision-max-tokens"),
-                                                  "vision-max-tokens");
-            if (val <= 0) {
-                throw std::invalid_argument("--vision-max-tokens must be positive");
-            }
+            const int val =
+                parse_nonnegative_int(require_value("--vision-max-tokens"), "vision-max-tokens");
+            if (val <= 0) { throw std::invalid_argument("--vision-max-tokens must be positive"); }
             options.vision_max_tokens = static_cast<std::uint32_t>(val);
             options.enable_vision     = true;
         } else if (arg == "--no-cuda-graph") {
@@ -389,6 +385,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         if (options.default_max_tokens <= 0) {
             throw std::invalid_argument("--default-max-tokens must be positive");
         }
+    } else {
+        // Agent clients routinely omit max_tokens. A fixed protocol default silently truncates
+        // their output on a server configured for a large context, so an omitted option follows
+        // the configured context ceiling instead. The Engine clamps the resulting request to the
+        // capacity actually left after the prompt.
+        options.default_max_tokens = static_cast<int>(options.max_context);
     }
     return options;
 }

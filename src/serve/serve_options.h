@@ -12,8 +12,9 @@
 
 namespace ninfer::serve {
 
-// Protocol default when the client omits max_tokens. Engine independently
-// clamps the request to its effective context capacity.
+// Protocol default when the client omits max_tokens, used by a default-constructed ServeOptions.
+// parse_serve_options replaces it with the configured --max-context unless --default-max-tokens is
+// given. The Engine independently clamps the request to its effective context capacity.
 inline constexpr int kDefaultMaxTokens                    = 8192;
 inline constexpr std::size_t kDefaultMaxRequestBytes      = 384ULL << 20;
 inline constexpr std::size_t kDefaultResponseStoreRecords = 1024;

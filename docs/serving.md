@@ -733,7 +733,8 @@ positional: a string-form System value, a later array block, or an inline System
 same text remains ordinary prompt content. A `cache_control` marker attached to the consumed block
 is consumed with it rather than moved to adjacent content.
 
-`max_tokens` is optional for local clients and otherwise uses `--default-max-tokens`; a positive
+`max_tokens` is optional for local clients and otherwise uses `--default-max-tokens`, which
+follows `--max-context` unless the operator sets it; a positive
 value is the complete output budget. `max_tokens:0` is rejected because NInfer does not expose a
 completed zero-output cache-prewarm lifecycle. `temperature`, `top_p`, `top_k`, and
 `stop_sequences` enter Engine execution. A matched custom stop is returned as
@@ -845,7 +846,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
-| `--default-max-tokens N` | output limit when omitted by a request | `8192` |
+| `--default-max-tokens N` | output limit when omitted by a request | `--max-context` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
 | `--vision` | enable media input and load Vision GPU allocations | off |
 | `--vision-max-tokens N` | Vision scratchpad token capacity; also enables Vision | `8192` |
@@ -1029,6 +1030,13 @@ resolves once at startup.
 
 Admission reserves the full prompt-plus-effective-output page entitlement through request
 completion. A request remains queued until a legal resource plan can satisfy that entitlement.
+
+An omitted `--default-max-tokens` resolves to the configured `--max-context`, so a client that
+omits `max_tokens` is not silently truncated at a fixed protocol default. Such a request is
+entitled to the remaining context after its prompt, which is the same entitlement it would receive
+by asking for that many tokens explicitly. When several requests must run concurrently against a
+shared `--kv-capacity`, set `--default-max-tokens` to the output budget the deployment actually
+needs so the per-request entitlement leaves room for `--max-concurrency` lanes.
 
 Each reusable checkpoint contains KV and complete continuation state. At admission, capture, and
 finish boundaries, resource pressure may keep it on Device, move its StateImage and/or KV replicas
