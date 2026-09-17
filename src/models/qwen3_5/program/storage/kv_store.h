@@ -886,6 +886,17 @@ public:
         }
     }
 
+    // Whether an address space can be activated on this execution row. Rows are one per lane, so
+    // a caller with no lane of its own - the prompt cache adoption transaction - has to pick an
+    // unbound one and release it again before the next request needs it.
+    [[nodiscard]] bool execution_row_free(std::int32_t row) const noexcept {
+        return tables_->row_free(row);
+    }
+
+    [[nodiscard]] std::uint32_t execution_row_count() const noexcept {
+        return static_cast<std::uint32_t>(tables_->row_count());
+    }
+
     [[nodiscard]] std::optional<KVAddressSpaceHandle> create_inactive() noexcept {
         if (free_count_ == 0) { return std::nullopt; }
         const std::uint32_t index = free_[--free_count_];

@@ -22,6 +22,8 @@ struct RuntimeTypes {
     using CaptureOffer               = qwen3_5::CaptureOffer;
     using CacheSessionKey            = qwen3_5::PreparedSessionKey;
     using ContinuationSummary        = qwen3_5::ContinuationSummary;
+    using PromptCacheAdoption        = qwen3_5::PromptCacheAdoption;
+    using PromptCacheAdoptionResult  = qwen3_5::PromptCacheAdoptionResult;
     using SharedPrefixSummary        = qwen3_5::SharedPrefixSummary;
     using PressurePlanningSession    = qwen3_5::PressurePlanningSession;
     using PressureTargetHandle       = qwen3_5::PressureTargetHandle;

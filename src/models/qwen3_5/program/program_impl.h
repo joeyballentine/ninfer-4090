@@ -578,6 +578,7 @@ public:
     prepare_prompt_cache_capture(const SharedPrefixHandle& owner,
                                  runtime::CheckpointRef checkpoint);
     void release_finished_prompt_cache_captures() noexcept;
+    [[nodiscard]] qwen3_5::PromptCacheAdoptionResult adopt_prompt_cache_record();
 
     [[nodiscard]] qwen3_5::PhysicalUsageSnapshot physical_usage() const noexcept;
 

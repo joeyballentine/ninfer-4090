@@ -790,7 +790,12 @@ ProgramImpl::prepare_prompt_cache_capture(const SharedPrefixHandle& owner,
 }
 
 void ProgramImpl::release_finished_prompt_cache_captures() noexcept {
-    if (prompt_cache_port_) { prompt_cache_port_->release_finished(); }
+    if (!prompt_cache_port_) { return; }
+    prompt_cache_port_->release_finished();
+    // A restore is adopted in the same admission step that started it. If one is still here at a
+    // round boundary nothing will ever consume it, so its Host State slot and Host KV allocation
+    // go back to their pools instead of staying out of the pressure planner's reach.
+    prompt_cache_port_->discard_restored_record();
 }
 
 qwen3_5::ContinuationSummary

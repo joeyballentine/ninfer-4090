@@ -499,6 +499,10 @@ void Program::release_finished_prompt_cache_captures() noexcept {
     impl_->release_finished_prompt_cache_captures();
 }
 
+PromptCacheAdoptionResult Program::adopt_prompt_cache_record() {
+    return impl_->adopt_prompt_cache_record();
+}
+
 PhysicalUsageSnapshot Program::physical_usage() const noexcept { return impl_->physical_usage(); }
 
 MemorySummary Program::memory_summary() const noexcept { return impl_->memory_summary(); }

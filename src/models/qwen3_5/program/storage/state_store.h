@@ -163,6 +163,26 @@ public:
         return handle;
     }
 
+    // Adopts a Host slot the caller has already filled as an immutable checkpoint. The
+    // persistent prompt cache reads a record's State image straight into a reserved slot, and
+    // this is the only way that slot becomes a logical checkpoint object: every other Host
+    // replica arrives through a transfer from a Device one, which a restored record has no source
+    // for. The result is Host-only, so a materialization that selects it prices the H2D restore
+    // the same way it does for a pressure-demoted checkpoint.
+    //
+    // A disengaged result leaves `slot` with the caller, who must return it to the pool.
+    [[nodiscard]] std::optional<StateImageHandle>
+    adopt_host_checkpoint(qwen3_5::HostStateSlotHandle slot) noexcept {
+        if (host_ == nullptr || free_object_count_ == 0) { return std::nullopt; }
+        const std::uint32_t index = free_objects_[--free_object_count_];
+        Object& object            = objects_[index];
+        object =
+            Object{.generation = object.generation, .role = StateImageRole::CheckpointImmutable};
+        object.host_slot     = slot;
+        object.content_epoch = next_epoch();
+        return StateImageHandle(this, index, object.generation);
+    }
+
     void activate_reset(StateImageHandle handle, cudaStream_t stream = nullptr) {
         Object& object = require(handle);
         if (object.role != StateImageRole::ReservedDestination || !object.device_slot ||

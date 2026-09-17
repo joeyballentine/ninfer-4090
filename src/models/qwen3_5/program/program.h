@@ -109,6 +109,33 @@ struct SharedPrefixSummary {
                                          const SharedPrefixSummary&) noexcept = default;
 };
 
+// Why a restored persistent prompt-cache record did or did not become a continuation. Adoption
+// never evicts anything to succeed, so a decline is an ordinary outcome and the request prefills.
+enum class PromptCacheAdoption : std::uint8_t {
+    Adopted,
+    // Nothing to adopt: the last restore failed, or it was already taken.
+    NoRestoredRecord,
+    // A context transaction is open, so no logical state may change.
+    ProgramBusy,
+    // The record describes a checkpoint shape this transaction does not assemble: a rewrite
+    // checkpoint, a long anchor, a shared prefix, or a geometry that is not this Program's.
+    UnsupportedRecord,
+    // The record carries no ledger, identity or digest series, so it could be shortlisted but
+    // never exactly verified.
+    MissingIdentity,
+    // The record or the Program has a speculative backend KV pool, which adoption does not
+    // assemble.
+    BackendPoolUnsupported,
+    // No free catalog slot or no unbound KV execution row. Taking either from a resident owner
+    // would trade a proven source for a restored one.
+    NoLogicalSlot,
+    // Reserving the checkpoint's Device KV pages would exceed admission capacity.
+    DevicePagesUnavailable,
+    // A store refused a step that passed its precondition check; nothing was retained.
+    TransactionFailed,
+};
+
+
 namespace detail {
 
 struct SequencePlanImpl;
@@ -399,6 +426,12 @@ private:
     std::uint64_t generation_ = 0;
 
     friend struct detail::RuntimeContractAccess;
+};
+
+struct PromptCacheAdoptionResult {
+    PromptCacheAdoption status = PromptCacheAdoption::NoRestoredRecord;
+    std::optional<ContinuationHandle> continuation;
+    ContinuationSummary summary;
 };
 
 class PressureTargetHandle {
@@ -971,6 +1004,13 @@ public:
     prepare_prompt_cache_capture(const SharedPrefixHandle& owner,
                                  runtime::CheckpointRef checkpoint);
     void release_finished_prompt_cache_captures() noexcept;
+
+    // Turns the record the port last restored into a catalogued continuation, so the planner
+    // prices it like any other resident source and only the uncovered suffix is prefilled. It
+    // runs on the Engine worker, between requests, and consumes the restore either way: on a
+    // decline the reserved Host State slot and the filled Host KV allocation go back to their
+    // pools. Nothing resident is ever evicted to make room.
+    [[nodiscard]] PromptCacheAdoptionResult adopt_prompt_cache_record();
 
     [[nodiscard]] ContextCacheSignatureFacts
     context_cache_signature_facts(std::string_view artifact_identity) const;

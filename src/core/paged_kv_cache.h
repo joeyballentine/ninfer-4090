@@ -357,6 +357,12 @@ public:
 
     [[nodiscard]] std::uint32_t logical_page_capacity() const noexcept;
     [[nodiscard]] std::int32_t row_count() const noexcept;
+
+    // Whether `acquire(row)` would succeed. Every row belongs to one execution lane, so a caller
+    // that needs a row outside the lane it was given has to find an unbound one first.
+    [[nodiscard]] bool row_free(std::int32_t row) const noexcept {
+        return row >= 0 && row < row_count() && !row_in_use_[static_cast<std::size_t>(row)];
+    }
     [[nodiscard]] KVExecutionRowLease acquire(std::int32_t row);
 
     void publish(KVExecutionRowHandle row, std::uint32_t logical_begin,

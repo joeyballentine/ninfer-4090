@@ -90,18 +90,43 @@ public:
 
     [[nodiscard]] std::optional<HostKVExtentReservation>
     prepare(LogicalKVPageStore& pages, std::span<const LogicalKVPageHandle> membership) {
-        if (membership.empty() || free_count_ == 0 || membership.size() > free_membership_count_) {
+        if (!preparable(pages, membership)) { return std::nullopt; }
+        std::optional<HostKVAllocation> allocation =
+            arena_->allocate(page_layout(pages), static_cast<std::uint32_t>(membership.size()));
+        if (!allocation) { return std::nullopt; }
+        return install(pages, membership, std::move(*allocation));
+    }
+
+    // Reserves an extent over an allocation the caller already owns and has already filled. The
+    // persistent prompt cache reads a record straight into arena memory, so publishing that same
+    // allocation as the extent is what keeps a restore from copying every page a second time.
+    // A disengaged result leaves `allocation` with the caller, who must release it.
+    [[nodiscard]] std::optional<HostKVExtentReservation>
+    prepare_adopted(LogicalKVPageStore& pages, std::span<const LogicalKVPageHandle> membership,
+                    HostKVAllocation&& allocation) {
+        if (!allocation.valid() || !preparable(pages, membership) ||
+            allocation.page_count() != membership.size() ||
+            arena_->view(allocation).layout() != page_layout(pages)) {
             return std::nullopt;
         }
-        for (const LogicalKVPageHandle page : membership) {
-            if (!pages.can_pin_source(page) || pages.host_resident(page)) { return std::nullopt; }
+        return install(pages, membership, std::move(allocation));
+    }
+
+private:
+    [[nodiscard]] bool preparable(LogicalKVPageStore& pages,
+                                  std::span<const LogicalKVPageHandle> membership) const noexcept {
+        if (membership.empty() || free_count_ == 0 || membership.size() > free_membership_count_) {
+            return false;
         }
+        for (const LogicalKVPageHandle page : membership) {
+            if (!pages.can_pin_source(page) || pages.host_resident(page)) { return false; }
+        }
+        return true;
+    }
 
-        const HostKVPageLayout& layout = page_layout(pages);
-        std::optional<HostKVAllocation> allocation =
-            arena_->allocate(layout, static_cast<std::uint32_t>(membership.size()));
-        if (!allocation) { return std::nullopt; }
-
+    [[nodiscard]] HostKVExtentReservation install(LogicalKVPageStore& pages,
+                                                  std::span<const LogicalKVPageHandle> membership,
+                                                  HostKVAllocation&& allocation) {
         const std::uint32_t descriptor = free_[--free_count_];
         Extent& extent                 = extents_[descriptor];
         if (extent.state != ExtentState::Free) { std::terminate(); }
@@ -136,6 +161,7 @@ public:
         return reservation;
     }
 
+public:
     [[nodiscard]] HostKVAllocationView writable_view(HostKVExtentReservation& reservation) {
         validate(reservation);
         return arena_->writable_view(*extents_[reservation.descriptor_].allocation);
