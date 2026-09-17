@@ -28,11 +28,44 @@ the weights again.
 
 ## Quick start
 
-NInfer requires 64-bit Linux, an NVIDIA GeForce RTX 5090, a CUDA toolkit supporting `sm_120a`,
-CMake 3.28 or newer, a C++20 host compiler, Ninja, `pkg-config`, FFmpeg development libraries
-(`libavformat`, `libavcodec`, `libavutil`, and `libswscale`), and `libcurl >= 7.85`.
-CUDA 13.1 is the validated development toolkit; CMake does not impose a CUDA version floor.
-The build rejects CUDA architectures other than `sm_120a`.
+NInfer requires 64-bit Linux or Windows 11, an NVIDIA GeForce RTX 5090 (`sm_120a`) or RTX 4090
+(`sm_89`), a CUDA toolkit supporting that architecture, CMake 3.28 or newer, a C++20 host
+compiler, Ninja, `pkg-config`, FFmpeg development libraries (`libavformat`, `libavcodec`,
+`libavutil`, and `libswscale`), and `libcurl >= 7.85`. CUDA 13.1 is the validated development
+toolkit on the RTX 5090 and CUDA 13.3/13.4 on the RTX 4090; CMake does not impose a CUDA version
+floor. The build rejects CUDA architectures other than `sm_120a` and `sm_89`.
+
+### RTX 4090 (`sm_89`) build
+
+This tree carries the Ada Lovelace port layer described in [NOTICE](NOTICE). Configure with the
+architecture set explicitly:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89
+cmake --build build -j
+```
+
+What changes on `sm_89`:
+
+- Use the `groupwise-int` artifacts (`qwen3_8_27b.ninfer`, `qwen3_6_27b.ninfer`,
+  `qwen3_6_35b_a3b.ninfer`). The `nvfp4` artifacts need Blackwell FP4 tensor cores; on Ada the
+  NVFP4 W4A4 routes and the `nvfp4` / `k8v4` KV cache modes are compiled as stubs that fail with
+  a clear error at startup.
+- Two extra KV cache modes fit long contexts in 24 GB: `--kv-dtype rk4v4` (Hadamard-rotated 4-bit
+  keys and values) and `--kv-dtype rk4v4-e8` (4-bit keys on the E8 Conway-Sloane lattice, higher
+  key fidelity). `int8` remains the highest-precision choice when the context fits.
+- On Windows, `--wddm-evictable-budget` lets a GPU that does not drive the desktop budget against
+  total VRAM minus a 512 MiB display floor. `--vision-max-tokens` caps the Vision workspace
+  (default 8192 tokens). `--tolerant-tool-calls` accepts complete Qwen tool calls followed by
+  trailing text.
+- Existing v2 `.ninfer` downloads must be upgraded once with
+  `tools/upgrade_ninfer_v2_to_v3.py` (see [weight conversion](docs/weight-conversion.md)); the
+  upgrade preserves weights and installs the maintained chat template.
+
+Published performance below is for the RTX 5090. On a 24 GB RTX 4090 with the 16.96 GiB
+`groupwise-int` Qwen3.8-27B artifact, expect about 52 tok/s single-token decode (the card's
+memory-bandwidth ceiling), 100 to 150 tok/s on code with `--spec mtp --lm-head-draft`, and about
+2,100 tok/s prefill.
 
 Build the product binaries:
 
