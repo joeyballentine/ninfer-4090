@@ -17,3 +17,7 @@ ninfer_add_test(ninfer_sampling_defaults_test
 ninfer_add_test(ninfer_context_disk_store_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_context_disk_store.cpp"
   LIBRARIES ninfer_runtime_support)
+
+ninfer_add_test(ninfer_context_disk_tier_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_context_disk_tier.cpp"
+  LIBRARIES ninfer_runtime_support)

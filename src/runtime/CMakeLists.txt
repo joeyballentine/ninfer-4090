@@ -3,6 +3,7 @@ add_library(ninfer_runtime_support STATIC
   engine/context_cache/context_cost.cpp
   engine/context_cache/context_cost_defaults.cpp
   engine/context_cache/context_disk_store.cpp
+  engine/context_cache/context_disk_tier.cpp
   engine/kv_capacity.cpp
   engine/public_types.cpp
 )
