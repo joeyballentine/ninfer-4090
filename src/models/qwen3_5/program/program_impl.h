@@ -555,6 +555,9 @@ public:
         return resource_revision_;
     }
 
+    [[nodiscard]] qwen3_5::ContextCacheSignatureFacts
+    context_cache_signature_facts(std::string_view artifact_identity) const;
+
     [[nodiscard]] qwen3_5::PhysicalUsageSnapshot physical_usage() const noexcept;
 
     [[nodiscard]] MemorySummary memory_summary() const noexcept;

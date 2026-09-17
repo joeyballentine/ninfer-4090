@@ -240,9 +240,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     if (plan.persistent.token_counts) {
         token_counts = plan.persistent.token_counts->bind(backing);
     }
-    if (plan.persistent.token_masks) {
-        token_masks = plan.persistent.token_masks->bind(backing);
-    }
+    if (plan.persistent.token_masks) { token_masks = plan.persistent.token_masks->bind(backing); }
     if (plan.persistent.sampling_config) {
         sampling_config = plan.persistent.sampling_config->bind(backing);
     }
@@ -577,5 +575,34 @@ void ProgramImpl::reset_memory_peaks() noexcept {
     }
 }
 
+qwen3_5::ContextCacheSignatureFacts
+ProgramImpl::context_cache_signature_facts(std::string_view artifact_identity) const {
+    // Page byte sizes come from the host page layout rather than from any single layer: a
+    // two-tier KV schedule gives each layer its own plane bytes, and `page_stride` is the only
+    // number that covers all of them for one page group. It is derived from the pool geometry, so
+    // it is the same whether or not a Host KV arena was configured.
+    const KVPageGeometry& main_geometry = text_kv_pages->physical_pool().geometry();
+    const HostKVPageLayout main_layout  = plan_host_kv_page_layout(main_geometry);
+    qwen3_5::ContextCacheSignatureFacts facts;
+    facts.artifact_identity   = artifact_identity;
+    facts.kv_storage          = kv_storage;
+    facts.speculative_backend = speculative_backend;
+    facts.proposal_head       = proposal_head;
+    facts.max_context         = capacity;
+    facts.kv_capacity         = kv_capacity;
+    facts.main_page_tokens    = main_geometry.page_tokens;
+    facts.main_plane_count    = static_cast<std::uint32_t>(main_geometry.planes.size());
+    facts.main_page_bytes     = main_layout.page_stride;
+    facts.state_image_bytes   = state_images->host_layout().image_bytes;
+    facts.vision_enabled      = vision_enabled ? 1U : 0U;
+    if (backend_kv_pages) {
+        const KVPageGeometry& backend_geometry = backend_kv_pages->physical_pool().geometry();
+        const HostKVPageLayout backend_layout  = plan_host_kv_page_layout(backend_geometry);
+        facts.backend_page_tokens              = backend_geometry.page_tokens;
+        facts.backend_plane_count = static_cast<std::uint32_t>(backend_geometry.planes.size());
+        facts.backend_page_bytes  = backend_layout.page_stride;
+    }
+    return facts;
+}
 
 } // namespace ninfer::models::qwen3_5::detail

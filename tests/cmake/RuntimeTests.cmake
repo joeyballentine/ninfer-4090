@@ -21,3 +21,11 @@ ninfer_add_test(ninfer_context_disk_store_test
 ninfer_add_test(ninfer_context_disk_tier_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_context_disk_tier.cpp"
   LIBRARIES ninfer_runtime_support)
+
+ninfer_add_test(ninfer_context_cache_signature_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_context_cache_signature.cpp"
+  LIBRARIES ninfer_model_runtime)
+
+ninfer_add_test(ninfer_prompt_cache_options_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_prompt_cache_options.cpp"
+  LIBRARIES ninfer_engine ninfer_runtime_support)

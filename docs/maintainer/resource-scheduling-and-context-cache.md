@@ -479,6 +479,57 @@ executor；复制阶段可以被新到达的请求取消，此时活动 store �
 **批量。** 一条 record 的 page 数可达上千，整份 staging 会在 24 GB 级显卡上直接 OOM。spill 与 restore
 都按 `ContextDiskTransferPort::batch_pages()` 分批，tier 同时持有的 page 不超过一批。
 
+**Signature 组成。** store header 的 signature 由 Program 组成（`context_cache_signature.*`），因为
+只有模型知道哪些事实会改变一页字节的含义。`Program::context_cache_signature(artifact_identity)` 取
+Engine 在装载时已经算出的 `LoadSummary::prefill_signature` 作为 artifact 半边（它包含架构、config 解释
+与完整的绑定权重清单及其存储格式，很长，所以只有它的 64-bit FNV-1a 摘要进入 signature），再加上：
+
+| 组成项 | 来源 | 为什么必须包含 |
+|---|---|---|
+| `a<16 hex>` | `LoadSummary::prefill_signature` 摘要 | 换一个 artifact 或换一种权重格式后，同一段 prefix 的 KV 不再等价 |
+| `kv<spec>` + `t<tag>` | `KvCacheSchedule` 的 spec 与 `identity_tag()` | 一种 KV 表示写下的页不能按另一种读；`identity_tag` 与 §4.5 内存内 prefix identity 用的是同一个值 |
+| `sb`/`ph` | `SpeculativeBackend`、`ProposalHead` | backend 拥有第二个 KV pool，DFlash 还占 State image 的一部分 |
+| `c`/`k` | `max_context`、解析后的 KV capacity | 决定 page 数与 entitlement |
+| `mp`/`mn`/`mb`、`bp`/`bn`/`bb` | 两个 pool 的 `KVPageGeometry::page_tokens`、plane 数与 `plan_host_kv_page_layout().page_stride` | record 的一页就是一个 page group 的 `page_stride` 字节；per-layer schedule 让每层 plane 字节数不同，`page_stride` 是唯一覆盖全部层的数字 |
+| `s` | `StateImageDevicePool::host_layout().image_bytes` | State image 的字节布局 |
+| `v` | vision 是否启用 | 影响 position 与 prefix identity |
+
+首段 `q35-ctx1` 是格式版本：改变任何一项的拼写方式都必须提升它，否则两种不同的组成可能拼出同一个
+字符串并互相匹配对方的 record。整串只使用目录名可以原样保留的字符，所以 store 目录名不会把两个不同
+的 signature 折叠成同一个目录。
+
+**当前状态。** store、journal、LRU、压缩、取消、options 解析、signature 组成与 stats 已经就位；
+capture 一侧的 port 按上面的快照模型实现。把一条恢复出来的 record 变成 catalog 里的 continuation
+仍然缺一个 Program 事务：`KVAddressSpaceStore` 只能在 active address space 上 `ensure_mapped_to_tokens`
+并 `commit_frontier`，没有从既有页直接装配一个 inactive address space 的入口，而 continuation 还需要
+ledger、`ResidentPrefixIdentity`、rope delta 与 execution frontier 才能通过 exact verification。因此
+record 的 State image 除了 pinned StateImage 负载之外还要带一个 Program 自己定义的头部（ledger、
+prefix identity、frontier），`ContextDiskStore` 对此保持 payload-agnostic。在该事务落地之前，
+`ResourceManager::attach_disk_tier` 的 adoption 回调返回 disengaged，命中的 record 被释放、请求回退到
+prefill。
+
+**Transfer port 的线程契约。** `ContextDiskTier` 自带 I/O 线程，`begin_capture` / `capture_pages` /
+`capture_state_image` / `end_capture` 都在该线程上运行，与 Engine worker 的 decode round 并发；而
+`lookup` / `restore` 运行在调用线程，也就是 Engine worker 自己。ProgramImpl 是单 mutation owner
+（见 [Engine 架构](engine-architecture.md#51-单一-mutation-owner)），不是线程安全的，所以 port 的
+capture 一侧**不能**在 I/O 线程上触碰 ProgramImpl：
+
+- Engine worker 在 offer 时就把 checkpoint 的 host replica（pinned Host State slot 与 Host KV
+  extent）钉住并登记成一份快照，然后才入队 spill；
+- I/O 线程上的 `begin_capture` 只是在 port 自己的互斥量下查这份快照，`capture_pages` 只是从已经
+  pinned 的 host 内存 memcpy 进 staging，不发起任何 CUDA 调用，也不修改 Program 状态；
+- `end_capture` 只标记完成，实际解钉在 Engine worker 的下一次维护步里做。
+
+由此得到一条策略：只有 **State 与 KV 都已经 host-resident** 的 checkpoint 才会被 offer。Device-only
+的副本要回读就得占用 decode round 正在用的 transfer stream，这正是 §5.3 开头拒绝它的理由；把同样的
+规则扩展到 KV 页，capture 一侧就完全不需要 transfer stream 与 event 同步。restore 一侧运行在 Engine
+worker 上，因此可以直接使用 Program 的 `cudaMemcpyAsync` + `CudaCompletionEvent` 路径把字节放进
+Host State slot 或 device 页。
+
+**批量与 per-layer 几何。** record 的一页是一个 page group，字节数取 `plan_host_kv_page_layout` 的
+`page_stride`；per-layer KV schedule 让每层 plane 的字节数不同，但一个 page group 覆盖所有层，所以
+`page_stride` 是唯一正确且统一的 page 字节数。绝不要用固定 page 大小推算偏移。
+
 **DirectStorage。** Windows 上可以用 kernel-bypass DMA 跳过 pinned staging 往返。seam 声明在
 `ContextDiskTransferPort` 中并由 `_WIN32 && NINFER_DIRECTSTORAGE` 限定，本仓库不实现它（需要 Windows SDK、
 D3D12 设备和真实 GPU）。实现时必须在释放任何 staging 资源之前于 CPU 线程等待共享 D3D12 fence，否则

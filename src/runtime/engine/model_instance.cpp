@@ -100,6 +100,9 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         options.enable_vision        = false;
         options.use_cuda_graph       = false;
         options.context_cache        = ContextCacheOptions{.enabled = false};
+        // Scoring evaluates one window and publishes no checkpoint, so there is nothing for a
+        // persistent tier to hold.
+        options.prompt_cache = PromptCacheOptions{};
         break;
     default:
         throw std::invalid_argument("Engine purpose is invalid");
@@ -110,6 +113,24 @@ EngineOptions normalize_engine_options(EngineOptions options) {
 
     ContextCacheOptions& cache      = options.context_cache;
     const std::uint32_t concurrency = options.max_concurrency;
+    if (options.prompt_cache.enabled) {
+        // The disk tier is the third tier of the context cache, not an independent store: it is
+        // fed by checkpoints the first two tiers publish and it restores into a Host State slot.
+        // Enabling it without them would give a store nothing to write and nowhere to read into.
+        if (!cache.enabled) {
+            throw std::invalid_argument(
+                "the prompt cache requires the context cache; enable prefix reuse or drop it");
+        }
+        if (options.prompt_cache.max_bytes == 0) {
+            throw std::invalid_argument("the prompt cache size cap must be positive");
+        }
+        // One slot is the restore destination. A user who asked for none has asked for a tier
+        // that can never hand a record back.
+        if (cache.host_state_slots == 0) {
+            throw std::invalid_argument(
+                "the prompt cache requires at least one Host State slot to restore into");
+        }
+    }
     if (!cache.enabled) {
         if ((cache.device_state_slots && *cache.device_state_slots != 0) ||
             (cache.max_private_continuations && *cache.max_private_continuations != concurrency) ||

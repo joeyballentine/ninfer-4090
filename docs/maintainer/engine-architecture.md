@@ -573,6 +573,8 @@ checkpoint catalog。
 | Scheduler | `src/runtime/engine/scheduler.h`, `admission_policy.*` |
 | 实例构造与有效期 | `src/runtime/engine/model_instance.*` |
 | ResourceManager 与 materialization planner | `src/runtime/engine/context_cache/` |
+| 持久 prompt cache（store、journal、LRU、tier） | `src/runtime/engine/context_cache/context_disk_store.*`, `context_disk_tier.*`, `src/core/positional_file.*` |
+| prompt cache signature 与 transfer port | `src/models/qwen3_5/program/context_cache_signature.*` |
 | 请求、执行、资源与计时合同 | `src/runtime/contract/` |
 | 模型 config、绑定与只读数据 | `src/models/qwen3_5/config.*`, `load/`, `model.*` |
 | 原生参数与固定模型调用 | `src/models/qwen3_5/execution/` |

@@ -470,6 +470,15 @@ runtime::ProgramResourceRevision Program::resource_revision() const noexcept {
     return impl_->resource_revision();
 }
 
+ContextCacheSignatureFacts
+Program::context_cache_signature_facts(std::string_view artifact_identity) const {
+    return impl_->context_cache_signature_facts(artifact_identity);
+}
+
+std::string Program::context_cache_signature(std::string_view artifact_identity) const {
+    return qwen3_5::context_cache_signature(context_cache_signature_facts(artifact_identity));
+}
+
 PhysicalUsageSnapshot Program::physical_usage() const noexcept { return impl_->physical_usage(); }
 
 MemorySummary Program::memory_summary() const noexcept { return impl_->memory_summary(); }

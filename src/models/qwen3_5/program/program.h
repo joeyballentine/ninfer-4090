@@ -4,6 +4,7 @@
 #include "runtime/contract/execution.h"
 #include "runtime/contract/resources.h"
 #include "models/qwen3_5/frontend/prepared_prompt.h"
+#include "models/qwen3_5/program/context_cache_signature.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +12,8 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -942,6 +945,15 @@ public:
     [[nodiscard]] PhysicalUsageSnapshot physical_usage() const noexcept;
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
     void reset_memory_peaks() noexcept;
+
+    // Persistent prompt-cache identity. The Engine supplies the artifact half it already computed
+    // at load; the Program adds the KV schedule and the resolved KV/context geometry, because only
+    // it knows which of those facts change what a stored page means. A store whose header carries
+    // a different string is never matched, so this is the guard against restoring a checkpoint
+    // written by a differently configured model.
+    [[nodiscard]] ContextCacheSignatureFacts
+    context_cache_signature_facts(std::string_view artifact_identity) const;
+    [[nodiscard]] std::string context_cache_signature(std::string_view artifact_identity) const;
 
 private:
     explicit Program(std::unique_ptr<detail::ProgramImpl> impl) noexcept;
