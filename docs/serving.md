@@ -862,6 +862,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--kv-dtype rk4v4\|rk4v4-e8` | rotated 4-bit keys and 4-bit values; `rk4v4-e8` projects the rotated keys onto the E8 Conway-Sloane lattice; sm_89 builds only | `bf16` |
 | `--kv-dtype rk8v4` | Hadamard-rotated 8-bit keys and 4-bit values (400 B per token/head at head_dim 256); sm_89 builds only | `bf16` |
 | `--kv-dtype rk2v4-e8` | 2-bit E8 cylinder keys and 4-bit values (208 B per token/head at head_dim 256); sm_89 builds only | `bf16` |
+| `--kv-dtype X:N,Y` | two-tier schedule: the first `N` full-attention layers use `X`, the rest use `Y`; `N` counts attention layers, not text layers, and must be below the model's full-attention layer count | uniform |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..15`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
@@ -894,6 +895,17 @@ The table lists executable defaults. The startup example selects a long-context 
 `--kv-dtype rk8v4`, `--kv-dtype rk4v4`, `--kv-dtype rk4v4-e8` and `--kv-dtype rk2v4-e8` are
 implemented only by the sm_89 attention and KV kernels; startup fails on any other compute
 capability.
+
+`--kv-dtype X:N,Y` selects a two-tier per-layer schedule: the first `N` full-attention layers
+store their KV as `X`, the rest as `Y`. `N` counts full-attention layers, not text layers, and
+must be at least 1 and below the model's full-attention layer count (16 on Qwen3.8-27B, where 48
+of the 64 text layers are GDN layers with a fixed state). Each layer keeps its own physical page
+size, so the KV pool costs the summed per-layer bytes per token and `--kv-capacity auto` sizes
+from that sum. A schedule naming any rotated mode in either tier requires an sm_89 build. The
+resolved schedule is reported as the spec string in the startup capacity line and as
+`kv_cache` in the JSONL `server_start` environment record. Per-layer precision thresholds are
+unmeasured: compare a candidate schedule against the uniform kinds with `ninfer-perplexity` on the
+code domain before adopting one.
 `--wddm-evictable-budget` has no effect outside Windows.
 
 Context-cost coefficients resolve once at startup from generic defaults, matching compiled values,
