@@ -72,13 +72,25 @@ selected for this process.
 Engine-wide failure it returns HTTP 503 with `{"status":"unavailable"}`. Temporary queue
 saturation does not make the Engine unavailable. The endpoint remains unauthenticated.
 
+Every OpenAI-compatible response carries a unique `x-request-id` header, including streaming and
+error responses. Anthropic endpoints use their separate `request-id` contract.
+
+All three generation SSE endpoints emit the standard `: keep-alive` comment after five seconds
+without a protocol event. The comment is transport-only: SSE clients ignore it, and it does not
+change generated text, event ordering, usage, stored Responses, or request logs. On Linux, accepted
+connections also use TCP keepalive and a 15-second `TCP_USER_TIMEOUT`; together with the heartbeat,
+a dead or unacknowledging peer is normally cancelled within about 20 seconds, including while the
+request is waiting or prefilling. A peer whose TCP stack remains connected and acknowledges data
+cannot be distinguished from a reading application; proxies must close their upstream NInfer
+connection when the downstream client disappears.
+
 ### Metrics
 
 `GET /metrics` returns the Prometheus text exposition format (`text/plain; version=0.0.4`) with a
-`# HELP` and `# TYPE` line per family. Every family is a monotonic counter accumulated at the same
-terminal request boundary that writes the operational and JSONL request records, so a request is
-counted exactly once regardless of protocol or streaming mode. The endpoint requires the API key
-when `--api-key` is set.
+`# HELP` and `# TYPE` line per family. The counters accumulate at the same terminal request
+boundary that writes the operational and JSONL request records, so a request is counted exactly
+once regardless of protocol or streaming mode. The endpoint requires the API key when `--api-key`
+is set.
 
 | Family | Meaning |
 |---|---|
@@ -86,7 +98,7 @@ when `--api-key` is set.
 | `llamacpp:prompt_seconds_total` | prefill wall seconds |
 | `llamacpp:tokens_predicted_total` | completion tokens committed by decode |
 | `llamacpp:tokens_predicted_seconds_total` | decode wall seconds |
-| `ninfer:requests_total` | terminal requests: completed, failed, or rejected |
+| `ninfer:requests_total` | terminal requests: completed, failed, rejected, or cancelled |
 | `ninfer:requests_failed_total` | terminal requests the server failed or rejected |
 | `ninfer:requests_cancelled_total` | terminal requests whose client disconnected or cancelled |
 | `ninfer:reasoning_tokens_total` | completion tokens attributed to reasoning content |
@@ -135,18 +147,6 @@ the owning request's own stream, so it is not part of this snapshot; use
 `llamacpp:tokens_predicted_total` for aggregate decode throughput.
 
 This endpoint is NInfer's own contract, not llama.cpp's `/slots` shape.
-
-Every OpenAI-compatible response carries a unique `x-request-id` header, including streaming and
-error responses. Anthropic endpoints use their separate `request-id` contract.
-
-All three generation SSE endpoints emit the standard `: keep-alive` comment after five seconds
-without a protocol event. The comment is transport-only: SSE clients ignore it, and it does not
-change generated text, event ordering, usage, stored Responses, or request logs. On Linux, accepted
-connections also use TCP keepalive and a 15-second `TCP_USER_TIMEOUT`; together with the heartbeat,
-a dead or unacknowledging peer is normally cancelled within about 20 seconds, including while the
-request is waiting or prefilling. A peer whose TCP stack remains connected and acknowledges data
-cannot be distinguished from a reading application; proxies must close their upstream NInfer
-connection when the downstream client disappears.
 
 ## OpenAI Chat Completions
 
