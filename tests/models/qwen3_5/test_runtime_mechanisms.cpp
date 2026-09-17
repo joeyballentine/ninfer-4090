@@ -159,6 +159,19 @@ void test_round_layout() {
                round.mtp_decode->alignment_ids.shape[1] == 1,
            "MTP decode frame is explicit");
 
+    ninfer::LayoutBuilder deep_builder;
+    q36::RoundStateLayout deep_mtp = q36::begin_round_state_layout(
+        deep_builder, q36::RoundStateSpec{.hidden       = 32,
+                                          .output_rows  = 128,
+                                          .draft_window = 15,
+                                          .backend      = ninfer::SpeculativeBackend::Mtp});
+    q36::complete_round_state_layout(deep_builder, deep_mtp);
+    (void)deep_builder.finish(256);
+    expect(deep_mtp.mtp.has_value() && deep_mtp.mtp->draft_tokens.shape[0] == 15 &&
+               deep_mtp.mtp_decode.has_value() &&
+               deep_mtp.mtp_decode->alignment_ids.shape[0] == 16,
+           "K=15 MTP frames bind the full sixteen-column verify width");
+
     ninfer::LayoutBuilder speculative_builder;
     q36::RoundStateLayout dflash = q36::begin_round_state_layout(
         speculative_builder, q36::RoundStateSpec{.hidden       = 32,

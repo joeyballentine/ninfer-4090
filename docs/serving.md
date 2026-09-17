@@ -777,7 +777,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
 | `--kv-dtype rk4v4\|rk4v4-e8` | rotated 4-bit keys and 4-bit values; `rk4v4-e8` projects the rotated keys onto the E8 Conway-Sloane lattice; sm_89 builds only | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
+| `--draft-tokens N` | MTP `1..15`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |

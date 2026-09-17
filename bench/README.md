@@ -75,7 +75,7 @@ Example:
 `bf16` selects BF16 KV storage, `int8` selects INT8 group-64 KV storage, and `fp8` selects
 row-scaled E4M3 D256 KV storage.
 
-Select a backend with `--spec mtp|dflash|dflash2 --draft-tokens K` (MTP K=1..5, DFlash/DFlash2
+Select a backend with `--spec mtp|dflash|dflash2 --draft-tokens K` (MTP K=1..15, DFlash/DFlash2
 K=1..15); `--lm-head-draft` selects the optimized proposal head. CUDA Graph decode is
 enabled by default.
 
@@ -1011,7 +1011,7 @@ cmake --build build --parallel --target ninfer_argmax_bench ninfer_sampling_sele
 ```
 
 The G2/G3/G4 benchmark uses physical rows 248320 and valid token domain 248077. G2 covers optional
-occurrence counts and batched sampling at `B=1,2,4,8`; G3 covers one-hot MTP windows `K=1..5`.
+occurrence counts and batched sampling at `B=1,2,4,8`; G3 covers one-hot MTP windows `K=1..15`.
 With no arguments it runs the G2/G3 greedy/stochastic matrix. G4 covers DFlash2 sparse-q acceptance
 with `K=1..15`, 16 proposal candidates, `P=0..K`, and `B=1..8`. `--drafts` defaults to the
 checkpoint recommendation of seven; the default extent is the selected K.

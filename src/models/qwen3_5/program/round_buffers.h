@@ -12,7 +12,9 @@
 
 namespace ninfer::models::qwen3_5 {
 
-inline constexpr std::uint32_t kMtpDecodeMaximumDrafts    = 5;
+// Both backends verify K+1 columns in one batched causal attention call, which accepts at most 16
+// token columns per row once the decode batch holds more than one sequence. That bounds K at 15.
+inline constexpr std::uint32_t kMtpDecodeMaximumDrafts    = 15;
 inline constexpr std::uint32_t kMtpDecodeMaximumWidth     = kMtpDecodeMaximumDrafts + 1;
 inline constexpr std::uint32_t kDFlashDecodeMaximumDrafts = 15;
 inline constexpr std::uint32_t kDFlashDecodeMaximumWidth  = kDFlashDecodeMaximumDrafts + 1;

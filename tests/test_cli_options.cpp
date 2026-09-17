@@ -76,6 +76,20 @@ int main() {
                   }),
                   "CLI accepted an unsupported DFlash2 draft count");
     }
+    for (const auto k : {1U, 5U, 15U}) {
+        const auto mtp = parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "mtp",
+                                "--draft-tokens", std::to_string(k)});
+        failures += check(mtp.speculative.backend == ninfer::SpeculativeBackend::Mtp &&
+                              mtp.speculative.draft_tokens == k,
+                          "CLI did not preserve the MTP draft window");
+    }
+    for (const auto k : {0U, 16U}) {
+        failures += check(rejects([&] {
+                              (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                           "--spec", "mtp", "--draft-tokens", std::to_string(k)});
+                          }),
+                          "CLI accepted an MTP draft window outside the verify width");
+    }
     const ninfer::cli::Options nvfp4 =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "nvfp4"});
     failures += check(nvfp4.kv_cache == ninfer::KvCacheStorage::Nvfp4Group16,
