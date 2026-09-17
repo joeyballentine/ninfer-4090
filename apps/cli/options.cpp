@@ -117,9 +117,9 @@ std::string usage_text(const char* argv0) {
            "GPUs, ignoring the WDDM process budget (Windows only).\n"
            "--thinking-budget caps model-origin thinking tokens; inserted control tokens count "
            "toward --max-new.\n"
-           "--prompt-cache keeps computed prefixes on disk between runs, so a rerun that shares "
-           "a prefix restores it instead of prefilling it. The store defaults to "
-           "<artifact dir>/.ninfer-cache/<config signature> and to " +
+           "--prompt-cache writes computed prefixes to disk between runs; reading one back into a "
+           "live continuation is not implemented yet, so a rerun still prefills. The store "
+           "defaults to <artifact dir>/.ninfer-cache/<config signature> and to " +
            std::to_string(kDefaultPromptCacheMaxBytes / (1024ULL * 1024ULL * 1024ULL)) +
            " GiB, evicted least-recently-used.\n"
            "--kv-capacity auto leaves " +
