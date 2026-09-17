@@ -1,6 +1,7 @@
 #include "models/qwen3_5/program/prefix_identity.h"
 #include <algorithm>
 #include <bit>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <stdexcept>
@@ -114,6 +115,89 @@ void append_digest(std::vector<DigestPair>& digests, TokenId token, std::uint8_t
     }
     digests.push_back(digest);
 }
+
+// --- Byte encoding for the persistent prompt cache -------------------------------------------
+//
+// Fixed-width little-endian fields only: a record written by one build is read by the next one,
+// and `std::size_t` is not the same width everywhere this could ever be compiled.
+
+class ByteWriter {
+public:
+    explicit ByteWriter(std::vector<std::byte>& out) noexcept : out_(&out) {}
+
+    void u8(std::uint8_t value) { put(&value, sizeof(value)); }
+
+    void u32(std::uint32_t value) { put(&value, sizeof(value)); }
+
+    void u64(std::uint64_t value) { put(&value, sizeof(value)); }
+
+    void i32(std::int32_t value) { u32(static_cast<std::uint32_t>(value)); }
+
+    void f64(double value) { u64(std::bit_cast<std::uint64_t>(value)); }
+
+private:
+    void put(const void* source, std::size_t bytes) {
+        const auto* first = static_cast<const std::byte*>(source);
+        out_->insert(out_->end(), first, first + bytes);
+    }
+
+    std::vector<std::byte>* out_ = nullptr;
+};
+
+class ByteReader {
+public:
+    explicit ByteReader(std::span<const std::byte> payload) noexcept : payload_(payload) {}
+
+    [[nodiscard]] bool ok() const noexcept { return ok_; }
+
+    [[nodiscard]] bool exhausted() const noexcept { return cursor_ == payload_.size(); }
+
+    [[nodiscard]] std::uint8_t u8() { return get<std::uint8_t>(); }
+
+    [[nodiscard]] std::uint32_t u32() { return get<std::uint32_t>(); }
+
+    [[nodiscard]] std::uint64_t u64() { return get<std::uint64_t>(); }
+
+    [[nodiscard]] std::int32_t i32() { return static_cast<std::int32_t>(u32()); }
+
+    [[nodiscard]] double f64() { return std::bit_cast<double>(u64()); }
+
+    // A length field drives an allocation, so it is refused unless the payload still holds that
+    // many elements of `element_bytes`. Without that check a corrupt record reserves gigabytes.
+    [[nodiscard]] std::size_t length(std::size_t element_bytes) {
+        const std::uint64_t count = u64();
+        if (!ok_ || element_bytes == 0) { return 0; }
+        const std::size_t remaining = payload_.size() - cursor_;
+        if (count > remaining / element_bytes) {
+            ok_ = false;
+            return 0;
+        }
+        return static_cast<std::size_t>(count);
+    }
+
+private:
+    template <class T>
+    [[nodiscard]] T get() {
+        T value{};
+        if (!ok_ || payload_.size() - cursor_ < sizeof(T)) {
+            ok_ = false;
+            return value;
+        }
+        std::memcpy(&value, payload_.data() + cursor_, sizeof(T));
+        cursor_ += sizeof(T);
+        return value;
+    }
+
+    std::span<const std::byte> payload_;
+    std::size_t cursor_ = 0;
+    bool ok_            = true;
+};
+
+constexpr std::uint32_t kIdentityEncodingMagic = 0x3549'4451U; // "QDI5"
+// Smallest byte length one encoded Vision item can have: modality, grid, patch range, content
+// digest and the two empty length prefixes. It bounds the item count a payload can claim.
+constexpr std::size_t kMinimumEncodedVisionItemBytes = 1 + 12 + 16 + 32 + 16;
+constexpr std::uint32_t kDigestEncodingMagic         = 0x3544'4451U; // "QDD5"
 
 std::size_t checked_vision_end(const VisionItem& item, std::size_t prompt_tokens) {
     if (item.token_spans.empty()) {
@@ -260,6 +344,141 @@ bool ResidentPrefixIdentity::equals(const ResidentPrefixIdentity& other) const {
     return size() == other.size() && prefix_equals(other, size());
 }
 
+VisionPrefixExtent ResidentPrefixIdentity::vision_extent() const noexcept {
+    constexpr std::uint32_t maximum = std::numeric_limits<std::uint32_t>::max();
+    VisionPrefixExtent out;
+    out.items = static_cast<std::uint32_t>(std::min<std::size_t>(vision_items_.size(), maximum));
+    for (const VisionItem& item : vision_items_) {
+        out.patches = item.patch_count > maximum - out.patches
+                          ? maximum
+                          : out.patches + static_cast<std::uint32_t>(item.patch_count);
+    }
+    return out;
+}
+
+std::vector<std::byte> ResidentPrefixIdentity::encode() const {
+    std::vector<std::byte> out;
+    ByteWriter writer(out);
+    writer.u32(kIdentityEncodingMagic);
+    writer.u64(token_types_.size());
+    for (const std::uint8_t type : token_types_) { writer.u8(type); }
+    for (const auto& axis : positions_) {
+        writer.u64(axis.size());
+        for (const std::int32_t position : axis) { writer.i32(position); }
+    }
+    writer.u64(vision_items_.size());
+    for (const VisionItem& item : vision_items_) {
+        writer.u8(static_cast<std::uint8_t>(item.modality));
+        writer.i32(item.grid.temporal);
+        writer.i32(item.grid.height);
+        writer.i32(item.grid.width);
+        writer.u64(item.patch_begin);
+        writer.u64(item.patch_count);
+        for (const std::uint8_t byte : item.content_digest) { writer.u8(byte); }
+        writer.u64(item.timestamps.size());
+        for (const double timestamp : item.timestamps) { writer.f64(timestamp); }
+        writer.u64(item.token_spans.size());
+        for (const TokenSpan& span : item.token_spans) {
+            writer.u64(span.begin);
+            writer.u64(span.count);
+        }
+    }
+    writer.u64(rewrite_execution_frontiers_.size());
+    for (const std::uint32_t frontier : rewrite_execution_frontiers_) { writer.u32(frontier); }
+    return out;
+}
+
+bool ResidentPrefixIdentity::decode(std::span<const std::byte> payload) {
+    clear();
+    ByteReader reader(payload);
+    if (reader.u32() != kIdentityEncodingMagic || !reader.ok()) {
+        clear();
+        return false;
+    }
+    const std::size_t tokens = reader.length(sizeof(std::uint8_t));
+    if (!reader.ok()) {
+        clear();
+        return false;
+    }
+    token_types_.resize(tokens);
+    for (std::uint8_t& type : token_types_) { type = reader.u8(); }
+    for (auto& axis : positions_) {
+        const std::size_t count = reader.length(sizeof(std::uint32_t));
+        if (!reader.ok() || count != tokens) {
+            clear();
+            return false;
+        }
+        axis.resize(count);
+        for (std::int32_t& position : axis) { position = reader.i32(); }
+    }
+    const std::size_t items = reader.length(kMinimumEncodedVisionItemBytes);
+    if (!reader.ok()) {
+        clear();
+        return false;
+    }
+    vision_items_.resize(items);
+    for (VisionItem& item : vision_items_) {
+        const std::uint8_t modality = reader.u8();
+        if (modality != static_cast<std::uint8_t>(PromptModality::Image) &&
+            modality != static_cast<std::uint8_t>(PromptModality::Video)) {
+            clear();
+            return false;
+        }
+        item.modality      = static_cast<PromptModality>(modality);
+        item.grid.temporal = reader.i32();
+        item.grid.height   = reader.i32();
+        item.grid.width    = reader.i32();
+        item.patch_begin   = static_cast<std::size_t>(reader.u64());
+        item.patch_count   = static_cast<std::size_t>(reader.u64());
+        for (std::uint8_t& byte : item.content_digest) { byte = reader.u8(); }
+        const std::size_t timestamps = reader.length(sizeof(std::uint64_t));
+        if (!reader.ok()) {
+            clear();
+            return false;
+        }
+        item.timestamps.resize(timestamps);
+        for (double& timestamp : item.timestamps) { timestamp = reader.f64(); }
+        const std::size_t spans = reader.length(2U * sizeof(std::uint64_t));
+        if (!reader.ok()) {
+            clear();
+            return false;
+        }
+        item.token_spans.resize(spans);
+        for (TokenSpan& span : item.token_spans) {
+            span.begin = static_cast<std::size_t>(reader.u64());
+            span.count = static_cast<std::size_t>(reader.u64());
+        }
+    }
+    const std::size_t frontiers = reader.length(sizeof(std::uint32_t));
+    if (!reader.ok()) {
+        clear();
+        return false;
+    }
+    rewrite_execution_frontiers_.resize(frontiers);
+    for (std::uint32_t& frontier : rewrite_execution_frontiers_) { frontier = reader.u32(); }
+    if (!reader.ok() || !reader.exhausted()) {
+        clear();
+        return false;
+    }
+    // The comparison predicates assume ordered unique in-range rewrite frontiers and prefix
+    // ordered Vision spans; a record that breaks either would make `prefix_equals` meaningless
+    // instead of merely wrong.
+    std::uint32_t previous = 0;
+    for (const std::uint32_t frontier : rewrite_execution_frontiers_) {
+        if (frontier == 0 || frontier <= previous || frontier > tokens) {
+            clear();
+            return false;
+        }
+        previous = frontier;
+    }
+    std::size_t retained = 0;
+    if (!prefix_item_count(vision_items_, tokens, &retained) || retained != vision_items_.size()) {
+        clear();
+        return false;
+    }
+    return true;
+}
+
 bool ResidentPrefixIdentity::prefix_equals(const ResidentPrefixIdentity& other,
                                            std::size_t count) const {
     if (count > size() || count > other.size() ||
@@ -404,6 +623,44 @@ std::array<std::uint64_t, 2> PrefixShortlistDigests::at(std::size_t frontier) co
         throw std::out_of_range("prefix shortlist frontier exceeds resident identity");
     }
     return digests_[frontier];
+}
+
+std::vector<std::byte> PrefixShortlistDigests::encode() const {
+    std::vector<std::byte> out;
+    ByteWriter writer(out);
+    writer.u32(kDigestEncodingMagic);
+    writer.u64(digests_.size());
+    for (const DigestPair& digest : digests_) {
+        writer.u64(digest[0]);
+        writer.u64(digest[1]);
+    }
+    return out;
+}
+
+bool PrefixShortlistDigests::decode(std::span<const std::byte> payload) {
+    clear();
+    ByteReader reader(payload);
+    if (reader.u32() != kDigestEncodingMagic || !reader.ok()) {
+        clear();
+        return false;
+    }
+    const std::size_t count = reader.length(2U * sizeof(std::uint64_t));
+    // An empty digest vector has no frontier zero to roll from, which every append and every
+    // lookup assumes is present.
+    if (!reader.ok() || count == 0) {
+        clear();
+        return false;
+    }
+    digests_.resize(count);
+    for (DigestPair& digest : digests_) {
+        digest[0] = reader.u64();
+        digest[1] = reader.u64();
+    }
+    if (!reader.ok() || !reader.exhausted() || digests_.front() != kDigestOffset) {
+        clear();
+        return false;
+    }
+    return true;
 }
 
 bool prefix_matches(const PreparedPromptData& prompt, std::span<const TokenId> resident_tokens,

@@ -13,6 +13,14 @@
 
 namespace ninfer::models::qwen3_5::detail {
 
+// Vision terms of a prefix's prefill work: how many Vision items it covers and how many patches
+// they contribute. `PrefillWork` needs both, and after truncation the identity is the only place
+// that still knows them.
+struct VisionPrefixExtent {
+    std::uint32_t items   = 0;
+    std::uint32_t patches = 0;
+};
+
 class ResidentPrefixIdentity {
 public:
     void reserve(std::size_t tokens);
@@ -28,6 +36,18 @@ public:
     [[nodiscard]] bool matches(const PreparedPromptData& prompt, std::size_t count) const;
     [[nodiscard]] bool equals(const ResidentPrefixIdentity& other) const;
     [[nodiscard]] bool prefix_equals(const ResidentPrefixIdentity& other, std::size_t count) const;
+
+    // Byte form for the persistent prompt cache. A disk record has to carry the exact identity,
+    // not only a digest, because adopting a restored checkpoint runs the same token, position,
+    // Vision and rewrite-frontier comparison a resident one does. Only this class knows which
+    // fields that comparison reads, so the encoding lives with it. `decode` rejects a malformed
+    // or truncated payload and leaves the object cleared.
+    [[nodiscard]] std::vector<std::byte> encode() const;
+    [[nodiscard]] bool decode(std::span<const std::byte> payload);
+
+    // Counted over every retained Vision item, so it describes the frontier this identity has
+    // already been truncated to. Both terms saturate.
+    [[nodiscard]] VisionPrefixExtent vision_extent() const noexcept;
 
 private:
     std::vector<std::uint8_t> token_types_;
@@ -54,6 +74,12 @@ public:
     }
 
     [[nodiscard]] std::array<std::uint64_t, 2> at(std::size_t frontier) const;
+
+    // Byte form for the persistent prompt cache, as for `ResidentPrefixIdentity`. The digests are
+    // stored rather than recomputed so a restored record is checked against the key it was found
+    // under instead of trusting a second derivation of it.
+    [[nodiscard]] std::vector<std::byte> encode() const;
+    [[nodiscard]] bool decode(std::span<const std::byte> payload);
 
 private:
     std::vector<std::array<std::uint64_t, 2>> digests_;

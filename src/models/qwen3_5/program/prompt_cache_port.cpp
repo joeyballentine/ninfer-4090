@@ -46,7 +46,6 @@ PromptCacheTransferPort::PromptCacheTransferPort(ProgramImpl& program) : program
     state_image_bytes_ =
         static_cast<std::uint32_t>(program_.host_state_images->layout().image_bytes);
     capture_staging_.resize(static_cast<std::size_t>(batch_pages_) * page_bytes_);
-    state_staging_.resize(sizeof(PromptCacheRecordHeader) + state_image_bytes_);
 }
 
 PromptCacheTransferPort::~PromptCacheTransferPort() {
@@ -98,8 +97,44 @@ bool PromptCacheTransferPort::collect_pages(
     return true;
 }
 
-std::optional<std::uint64_t>
-PromptCacheTransferPort::build_snapshot(const SnapshotRequest& request) {
+// Concatenates the three identity blobs a record carries behind its State image. A missing piece
+// makes the whole set empty: a half-described record would be refused by adoption anyway, and
+// storing it would only invite a partial read.
+PromptCacheTransferPort::CaptureMetadata PromptCacheTransferPort::build_capture_metadata(
+    std::span<const TokenId> ledger, const qwen3_5::detail::ResidentPrefixIdentity* identity,
+    const qwen3_5::detail::PrefixShortlistDigests* digests, std::uint32_t frontier) {
+    PromptCacheTransferPort::CaptureMetadata out;
+    if (identity == nullptr || frontier == 0 || ledger.size() < frontier ||
+        identity->size() < frontier) {
+        return {};
+    }
+    qwen3_5::detail::ResidentPrefixIdentity truncated_identity = *identity;
+    truncated_identity.truncate(frontier);
+    const std::vector<std::byte> identity_bytes = truncated_identity.encode();
+    std::vector<std::byte> digest_bytes;
+    if (digests != nullptr && digests->size() >= frontier) {
+        qwen3_5::detail::PrefixShortlistDigests truncated_digests = *digests;
+        truncated_digests.truncate(frontier);
+        digest_bytes = truncated_digests.encode();
+    }
+    const std::size_t ledger_bytes = static_cast<std::size_t>(frontier) * sizeof(TokenId);
+    const std::size_t total        = ledger_bytes + identity_bytes.size() + digest_bytes.size();
+    if (total > std::numeric_limits<std::uint32_t>::max()) { return {}; }
+    out.blob.resize(total);
+    std::memcpy(out.blob.data(), ledger.data(), ledger_bytes);
+    std::memcpy(out.blob.data() + ledger_bytes, identity_bytes.data(), identity_bytes.size());
+    std::memcpy(out.blob.data() + ledger_bytes + identity_bytes.size(), digest_bytes.data(),
+                digest_bytes.size());
+    out.ledger_bytes   = static_cast<std::uint32_t>(ledger_bytes);
+    out.identity_bytes = static_cast<std::uint32_t>(identity_bytes.size());
+    out.digest_bytes   = static_cast<std::uint32_t>(digest_bytes.size());
+    const qwen3_5::detail::VisionPrefixExtent vision = truncated_identity.vision_extent();
+    out.vision_items                                 = vision.items;
+    out.vision_patches                               = vision.patches;
+    return out;
+}
+
+std::optional<std::uint64_t> PromptCacheTransferPort::build_snapshot(SnapshotRequest&& request) {
     const std::lock_guard<std::mutex> guard(mutex_);
     if (snapshots_.size() >= kMaximumOutstandingCaptures) { return std::nullopt; }
     if (request.frontier == 0 || !program_.state_store->can_pin_host_source(request.state)) {
@@ -141,25 +176,37 @@ PromptCacheTransferPort::build_snapshot(const SnapshotRequest& request) {
     }
     snapshot.state       = request.state;
     snapshot.state_image = state_image;
-    snapshot.state_bytes =
-        static_cast<std::uint32_t>(sizeof(PromptCacheRecordHeader)) + state_image_bytes_;
-    snapshot.header = PromptCacheRecordHeader{
-        .magic                   = kPromptCacheRecordMagic,
-        .version                 = kPromptCacheRecordVersion,
-        .checkpoint_kind         = static_cast<std::uint32_t>(request.checkpoint.kind),
-        .checkpoint_ordinal      = request.checkpoint.ordinal,
-        .frontier                = request.frontier,
-        .backend_frontier        = request.backend_frontier,
-        .main_pages              = main_pages,
-        .backend_pages           = backend_pages,
-        .main_page_bytes         = page_bytes_,
-        .backend_page_bytes      = backend_page_bytes_,
-        .state_image_bytes       = state_image_bytes_,
-        .execution_frontier      = request.execution_frontier,
-        .text_kv_valid           = request.text_kv_valid,
-        .mtp_kv_valid            = request.mtp_kv_valid,
-        .dflash_context_frontier = request.dflash_context_frontier,
-        .rope_delta              = request.rope_delta,
+    snapshot.metadata            = std::move(request.metadata.blob);
+    const std::size_t blob_bytes = sizeof(PromptCacheRecordHeader) +
+                                   static_cast<std::size_t>(state_image_bytes_) +
+                                   snapshot.metadata.size();
+    if (blob_bytes > std::numeric_limits<std::uint32_t>::max()) {
+        release_snapshot(snapshot);
+        return std::nullopt;
+    }
+    snapshot.state_bytes = static_cast<std::uint32_t>(blob_bytes);
+    snapshot.header      = PromptCacheRecordHeader{
+             .magic                   = kPromptCacheRecordMagic,
+             .version                 = kPromptCacheRecordVersion,
+             .checkpoint_kind         = static_cast<std::uint32_t>(request.checkpoint.kind),
+             .checkpoint_ordinal      = request.checkpoint.ordinal,
+             .frontier                = request.frontier,
+             .backend_frontier        = request.backend_frontier,
+             .main_pages              = main_pages,
+             .backend_pages           = backend_pages,
+             .main_page_bytes         = page_bytes_,
+             .backend_page_bytes      = backend_page_bytes_,
+             .state_image_bytes       = state_image_bytes_,
+             .execution_frontier      = request.execution_frontier,
+             .text_kv_valid           = request.text_kv_valid,
+             .mtp_kv_valid            = request.mtp_kv_valid,
+             .dflash_context_frontier = request.dflash_context_frontier,
+             .rope_delta              = request.rope_delta,
+             .ledger_bytes            = request.metadata.ledger_bytes,
+             .identity_bytes          = request.metadata.identity_bytes,
+             .digest_bytes            = request.metadata.digest_bytes,
+             .vision_items            = request.metadata.vision_items,
+             .vision_patches          = request.metadata.vision_patches,
     };
 
     const std::uint64_t token = next_token_++;
@@ -203,15 +250,17 @@ PromptCacheTransferPort::prepare_capture(const SequenceState& sequence,
     }
     if (state == nullptr) { return std::nullopt; }
     return build_snapshot(SnapshotRequest{
-        .text                    = sequence.kv->text,
-        .backend                 = sequence.kv->backend ? &*sequence.kv->backend : nullptr,
-        .state                   = *state,
-        .checkpoint              = checkpoint,
-        .frontier                = checkpoint.frontier,
-        .backend_frontier        = program_.checkpoint_backend_frontier(checkpoint.frontier),
-        .execution_frontier      = sequence.execution_frontier,
-        .text_kv_valid           = sequence.text_kv_valid,
-        .mtp_kv_valid            = sequence.mtp_kv_valid,
+        .text               = sequence.kv->text,
+        .backend            = sequence.kv->backend ? &*sequence.kv->backend : nullptr,
+        .state              = *state,
+        .checkpoint         = checkpoint,
+        .metadata           = build_capture_metadata(sequence.ledger, &sequence.prefix_identity,
+                                                     &sequence.prefix_digests, checkpoint.frontier),
+        .frontier           = checkpoint.frontier,
+        .backend_frontier   = program_.checkpoint_backend_frontier(checkpoint.frontier),
+        .execution_frontier = sequence.execution_frontier,
+        .text_kv_valid      = sequence.text_kv_valid,
+        .mtp_kv_valid       = sequence.mtp_kv_valid,
         .dflash_context_frontier = sequence.dflash_context_frontier,
         .rope_delta              = sequence.rope_delta,
     });
@@ -225,15 +274,21 @@ PromptCacheTransferPort::prepare_capture(const SharedPrefixState& shared,
         return std::nullopt;
     }
     return build_snapshot(SnapshotRequest{
-        .text                    = shared.kv->text,
-        .backend                 = shared.kv->backend ? &*shared.kv->backend : nullptr,
-        .state                   = shared.state,
-        .checkpoint              = checkpoint,
-        .frontier                = shared.frontier,
-        .backend_frontier        = shared.backend_frontier,
-        .execution_frontier      = shared.frontier,
-        .text_kv_valid           = shared.frontier,
-        .mtp_kv_valid            = shared.backend_frontier,
+        .text       = shared.kv->text,
+        .backend    = shared.kv->backend ? &*shared.kv->backend : nullptr,
+        .state      = shared.state,
+        .checkpoint = checkpoint,
+        // A shared prefix keeps its exact identity but no digest series, so its record carries
+        // the ledger and identity and is not adoptable; shared adoption needs its own slot kind.
+        .metadata           = shared.identity ? build_capture_metadata(shared.identity->ledger(),
+                                                                       shared.identity->prefix_identity(),
+                                                                       nullptr, shared.frontier)
+                                              : CaptureMetadata{},
+        .frontier           = shared.frontier,
+        .backend_frontier   = shared.backend_frontier,
+        .execution_frontier = shared.frontier,
+        .text_kv_valid      = shared.frontier,
+        .mtp_kv_valid       = shared.backend_frontier,
         .dflash_context_frontier = 0,
         .rope_delta              = shared.rope_delta,
     });
@@ -261,6 +316,8 @@ void PromptCacheTransferPort::release_snapshot(PromptCacheCaptureSnapshot& snaps
         snapshot.state_image = nullptr;
     }
     snapshot.sources.clear();
+    snapshot.metadata.clear();
+    snapshot.metadata.shrink_to_fit();
 }
 
 void PromptCacheTransferPort::release_finished() noexcept {
@@ -311,13 +368,19 @@ std::span<const std::byte> PromptCacheTransferPort::capture_pages(std::uint32_t 
 
 std::span<const std::byte> PromptCacheTransferPort::capture_state_image() {
     const std::lock_guard<std::mutex> guard(mutex_);
-    if (active_ == nullptr || active_->state_image == nullptr ||
-        state_staging_.size() != active_->state_bytes) {
-        return {};
+    if (active_ == nullptr || active_->state_image == nullptr) { return {}; }
+    try {
+        state_staging_.assign(active_->state_bytes, std::byte{});
+    } catch (const std::bad_alloc&) { return {}; }
+    if (state_staging_.size() != active_->state_bytes) { return {}; }
+    std::byte* cursor = state_staging_.data();
+    std::memcpy(cursor, &active_->header, sizeof(PromptCacheRecordHeader));
+    cursor += sizeof(PromptCacheRecordHeader);
+    std::memcpy(cursor, active_->state_image, state_image_bytes_);
+    cursor += state_image_bytes_;
+    if (!active_->metadata.empty()) {
+        std::memcpy(cursor, active_->metadata.data(), active_->metadata.size());
     }
-    std::memcpy(state_staging_.data(), &active_->header, sizeof(PromptCacheRecordHeader));
-    std::memcpy(state_staging_.data() + sizeof(PromptCacheRecordHeader), active_->state_image,
-                state_image_bytes_);
     return {state_staging_.data(), state_staging_.size()};
 }
 
@@ -342,8 +405,11 @@ void PromptCacheTransferPort::drop_capture(std::uint64_t owner_token) noexcept {
 std::optional<runtime::DiskCheckpointGeometry>
 PromptCacheTransferPort::begin_restore(const runtime::DiskRecordDescriptor& record) {
     const std::lock_guard<std::mutex> guard(mutex_);
+    // A completed restore nothing adopted still owns a Host State slot and a Host KV allocation.
+    // Starting the next restore is the point at which nothing can consume it any more.
+    if (restore_ && restore_->complete) { release_restore(); }
     if (restore_ || record.page_bytes != page_bytes_ || record.page_count == 0 ||
-        record.state_bytes != sizeof(PromptCacheRecordHeader) + state_image_bytes_) {
+        record.state_bytes < sizeof(PromptCacheRecordHeader) + state_image_bytes_) {
         return std::nullopt;
     }
     const HostKVPageLayout& layout = program_.host_kv_extents->page_layout(*program_.text_kv_pages);
@@ -403,7 +469,9 @@ bool PromptCacheTransferPort::commit_state_image(std::span<const std::byte> payl
     std::memcpy(&header, payload.data(), sizeof(header));
     // The store header signature already refuses a foreign model. This second check catches a
     // record written by the same signature but a different record layout version, which is the
-    // one way a matching store can still hold bytes this build cannot place.
+    // one way a matching store can still hold bytes this build cannot place. A version 1 record
+    // fails here, which is the whole point of the version field: its blob is shorter than this
+    // header, so nothing after `magic` would mean what it says.
     if (header.magic != kPromptCacheRecordMagic || header.version != kPromptCacheRecordVersion ||
         header.main_page_bytes != page_bytes_ || header.backend_page_bytes != backend_page_bytes_ ||
         header.state_image_bytes != state_image_bytes_ || header.frontier == 0) {
@@ -413,19 +481,89 @@ bool PromptCacheTransferPort::commit_state_image(std::span<const std::byte> payl
         static_cast<std::size_t>(header.main_pages) +
         static_cast<std::size_t>(header.backend_pages) * backend_record_pages_;
     if (expected != restore_->page_count) { return false; }
+    const std::size_t metadata_bytes =
+        static_cast<std::size_t>(header.ledger_bytes) + header.identity_bytes + header.digest_bytes;
+    if (sizeof(header) + state_image_bytes_ + metadata_bytes != payload.size()) { return false; }
+    std::vector<TokenId> ledger;
+    qwen3_5::detail::ResidentPrefixIdentity identity;
+    qwen3_5::detail::PrefixShortlistDigests digests;
+    if (metadata_bytes != 0 &&
+        !decode_metadata(header, payload.subspan(sizeof(header) + state_image_bytes_), ledger,
+                         identity, digests)) {
+        return false;
+    }
     const qwen3_5::HostStateImageView destination =
         program_.host_state_images->writable_view(*restore_->state_slot);
     if (destination.data == nullptr) { return false; }
     std::memcpy(destination.data, payload.data() + sizeof(header), state_image_bytes_);
     restore_->header          = header;
+    restore_->ledger          = std::move(ledger);
+    restore_->identity.swap(identity);
+    restore_->digests.swap(digests);
     restore_->state_committed = true;
     return true;
 }
 
+bool PromptCacheTransferPort::decode_metadata(const PromptCacheRecordHeader& header,
+                                              std::span<const std::byte> payload,
+                                              std::vector<TokenId>& ledger,
+                                              qwen3_5::detail::ResidentPrefixIdentity& identity,
+                                              qwen3_5::detail::PrefixShortlistDigests& digests) {
+    if (header.ledger_bytes % sizeof(TokenId) != 0 ||
+        header.ledger_bytes / sizeof(TokenId) != header.frontier) {
+        return false;
+    }
+    ledger.resize(header.frontier);
+    if (header.frontier != 0) { std::memcpy(ledger.data(), payload.data(), header.ledger_bytes); }
+    if (!identity.decode(payload.subspan(header.ledger_bytes, header.identity_bytes)) ||
+        identity.size() != header.frontier) {
+        return false;
+    }
+    // A shared-prefix record carries no digest series. It is decoded as empty and the adoption
+    // transaction refuses it there, where the reason can be named.
+    return header.digest_bytes == 0 ||
+           (digests.decode(payload.subspan(static_cast<std::size_t>(header.ledger_bytes) +
+                                               header.identity_bytes,
+                                           header.digest_bytes)) &&
+            digests.size() == header.frontier);
+}
+
 void PromptCacheTransferPort::end_restore(bool complete) noexcept {
     const std::lock_guard<std::mutex> guard(mutex_);
-    (void)complete;
-    release_restore();
+    if (!restore_) { return; }
+    // A complete restore is kept for the adoption transaction, which is the only thing that can
+    // turn it into a continuation; anything short of complete has no consumer.
+    if (!complete || !restore_->state_committed || restore_->page_cursor != restore_->page_count) {
+        release_restore();
+        return;
+    }
+    restore_->complete = true;
+    restore_->view     = {};
+    restore_state_staging_.clear();
+    restore_state_staging_.shrink_to_fit();
+}
+
+std::optional<PromptCacheRestoredRecord> PromptCacheTransferPort::take_restored_record() noexcept {
+    const std::lock_guard<std::mutex> guard(mutex_);
+    if (!restore_ || !restore_->complete || !restore_->pages || !restore_->state_slot) {
+        return std::nullopt;
+    }
+    PromptCacheRestoredRecord out;
+    out.pages      = std::move(*restore_->pages);
+    out.state_slot = *restore_->state_slot;
+    out.header     = restore_->header;
+    out.ledger     = std::move(restore_->ledger);
+    out.identity.swap(restore_->identity);
+    out.digests.swap(restore_->digests);
+    restore_->pages.reset();
+    restore_->state_slot.reset();
+    restore_.reset();
+    return out;
+}
+
+void PromptCacheTransferPort::discard_restored_record() noexcept {
+    const std::lock_guard<std::mutex> guard(mutex_);
+    if (restore_ && restore_->complete) { release_restore(); }
 }
 
 void PromptCacheTransferPort::release_restore() noexcept {
