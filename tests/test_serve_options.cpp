@@ -1,6 +1,7 @@
 #include "serve/serve_options.h"
 #include "serve/translate.h"
 
+#include <exception>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -21,6 +22,15 @@ ServeOptions parse(std::vector<std::string> arguments) {
     argv.reserve(arguments.size());
     for (std::string& argument : arguments) { argv.push_back(argument.data()); }
     return parse_serve_options(static_cast<int>(argv.size()), argv.data());
+}
+
+bool rejects(const std::vector<std::string>& arguments) {
+    try {
+        (void)parse(arguments);
+    } catch (const std::exception&) {
+        return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -98,6 +108,18 @@ int main() {
     const ServeOptions rk4v4_e8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk4v4-e8"});
     failures += check(rk4v4_e8.kv_cache == ninfer::KvCacheStorage::RK4V4E8,
                       "--kv-dtype rk4v4-e8 did not select E8-lattice int4 KV");
+    const ServeOptions tiered =
+        parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk8v4:8,rk2v4-e8"});
+    failures +=
+        check(tiered.kv_cache.head == ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 &&
+                  tiered.kv_cache.head_layers == 8 &&
+                  tiered.kv_cache.tail == ninfer::KvCacheStorage::RK2V4E8,
+              "--kv-dtype X:N,Y did not select a two-tier KV schedule");
+    failures += check(rk4v4_e8.kv_cache.uniform(), "--kv-dtype X is not a uniform KV schedule");
+    for (const char* spec : {"int8:0,rk4v4-e8", "int8:4", "int8:x,rk4v4-e8", "int8:4,bogus"}) {
+        failures += check(rejects({"ninfer-serve", "model.ninfer", "--kv-dtype", spec}),
+                          "serve accepted a malformed KV schedule");
+    }
     const std::string kv_help = serve_usage_text("ninfer-serve");
     failures += check(kv_help.find("nvfp4") != std::string::npos &&
                           kv_help.find("k8v4") != std::string::npos &&
