@@ -81,6 +81,9 @@ TestCacheLayout test_cache_layout(KvCacheStorage storage) {
     case KvCacheStorage::RK4V4E8:
         return {{DType::U8, kFullPackedCodeBytes, DType::FP16, kFullGroups},
                 {DType::U8, kFullPackedCodeBytes, DType::FP16, kFullGroups}};
+    case KvCacheStorage::RK2V4E8:
+        return {{DType::U8, kFullE8RootCodeBytes, DType::FP16, kFullGroups},
+                {DType::U8, kFullPackedCodeBytes, DType::FP16, kFullGroups}};
     }
     throw std::invalid_argument("unsupported test KV storage");
 }
@@ -384,16 +387,18 @@ void encode_full_group(const std::vector<float>& source, std::size_t source_base
 
 #if defined(NINFER_SM89)
 // ---------------------------------------------------------------------------
-// Rotated sm_89 family (rk8v4, rk4v4, rk4v4-e8) exact codec oracle. Every mode
-// rotates K and V by H64 inside each 64-dim group before encoding. K is int8
-// (rk8v4) or packed int4 (rk4v4, with an E8 lattice projection for rk4v4-e8);
-// V is always packed int4. Both scale planes are FP16 per group-64.
+// Rotated sm_89 family (rk8v4, rk4v4, rk4v4-e8, rk2v4-e8) exact codec oracle.
+// Every mode rotates K and V by H64 inside each 64-dim group before encoding.
+// K is int8 (rk8v4), packed int4 (rk4v4, with an E8 lattice projection for
+// rk4v4-e8) or an 8-bit E8 root plus a 4-bit radius and a 4-bit residual axis
+// per 8 dims (rk2v4-e8). V is always packed int4; both scale planes are FP16
+// per group-64.
 // ---------------------------------------------------------------------------
 
 bool is_rotated_storage(KvCacheStorage storage) {
     return storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
            storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
-           storage == KvCacheStorage::RK4V4E8;
+           storage == KvCacheStorage::RK4V4E8 || storage == KvCacheStorage::RK2V4E8;
 }
 
 const char* rotated_storage_name(KvCacheStorage storage) {
@@ -404,6 +409,8 @@ const char* rotated_storage_name(KvCacheStorage storage) {
         return "rk4v4";
     case KvCacheStorage::RK4V4E8:
         return "rk4v4-e8";
+    case KvCacheStorage::RK2V4E8:
+        return "rk2v4-e8";
     default:
         return "rotated";
     }
@@ -434,7 +441,7 @@ void encode_rotated_group(KvCacheStorage storage, const std::vector<float>& host
     const bool packed_k = storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
                           storage == KvCacheStorage::RK4V4E8;
     const bool e8_lattice = storage == KvCacheStorage::RK4V4E8;
-    const bool e8_root    = false;
+    const bool e8_root    = storage == KvCacheStorage::RK2V4E8;
 
     const std::array<float, kFullGroup> k_rot = rotated_group(host_k, group, head, token, kv_heads);
     const std::array<float, kFullGroup> v_rot = rotated_group(host_v, group, head, token, kv_heads);
@@ -1720,7 +1727,7 @@ int main(int argc, char** argv) {
     // T>=32 the eight-token page-tiled kernel.
     for (const KvCacheStorage storage : {KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
                                          KvCacheStorage::RotatedInt4KeyInt4ValueGroup64,
-                                         KvCacheStorage::RK4V4E8}) {
+                                         KvCacheStorage::RK4V4E8, KvCacheStorage::RK2V4E8}) {
         for (const int kv_heads : {4, 2}) { failures += rotated_append_case(kv_heads, storage); }
         failures += rotated_append_case(2, storage, 129);
     }

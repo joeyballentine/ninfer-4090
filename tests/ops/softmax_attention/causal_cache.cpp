@@ -94,6 +94,14 @@ constexpr ReductionCriterion kAttentionRk4V4Criterion{
     /*gross_relative_to_max_reference*/ 2.0e-2,
 };
 
+// rk2v4-e8 reconstructs its keys from a 240-root direction and a 4-bit radius, so the oracle's
+// own key rows are coarse; the criterion still bounds the kernel against that exact rounding.
+constexpr ReductionCriterion kAttentionRk2V4Criterion{
+    /*relative_l2*/ 4.0e-2,
+    /*gross_absolute*/ 1.5e-2,
+    /*gross_relative_to_max_reference*/ 3.0e-2,
+};
+
 struct TestVectorLayout {
     DType code_dtype;
     std::int32_t code_extent;
@@ -128,6 +136,9 @@ TestCacheLayout test_cache_layout(KvCacheStorage storage) {
     case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
     case KvCacheStorage::RK4V4E8:
         return {{DType::U8, kRotPackedBytes, DType::FP16, kQuantGroups},
+                {DType::U8, kRotPackedBytes, DType::FP16, kQuantGroups}};
+    case KvCacheStorage::RK2V4E8:
+        return {{DType::U8, kRotE8KeyBytes, DType::FP16, kQuantGroups},
                 {DType::U8, kRotPackedBytes, DType::FP16, kQuantGroups}};
     }
     throw std::invalid_argument("unsupported test KV storage");
@@ -688,11 +699,12 @@ void encode_rotated_key_row(std::span<const float> source, std::size_t source_ba
 bool is_rotated_storage(KvCacheStorage storage) {
     return storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
            storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
-           storage == KvCacheStorage::RK4V4E8;
+           storage == KvCacheStorage::RK4V4E8 || storage == KvCacheStorage::RK2V4E8;
 }
 
 std::int32_t rotated_key_extent(KvCacheStorage storage) {
     if (storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) { return kHeadDim; }
+    if (storage == KvCacheStorage::RK2V4E8) { return kRotE8KeyBytes; }
     return kRotPackedBytes;
 }
 
@@ -716,8 +728,10 @@ void hadamard64_double(std::array<double, kQuantGroup>& values) {
 void encode_rotated_row(HostCache& cache, std::span<const float> k, std::span<const float> v,
                         std::size_t source, std::int32_t head, std::int32_t position) {
     const Geometry& geometry = cache.geometry;
-    const bool packed_k      = cache.storage != KvCacheStorage::RotatedInt8KeyInt4ValueGroup64;
+    const bool packed_k      = cache.storage != KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 &&
+                          cache.storage != KvCacheStorage::RK2V4E8;
     const bool e8_lattice    = cache.storage == KvCacheStorage::RK4V4E8;
+    const bool e8_root       = cache.storage == KvCacheStorage::RK2V4E8;
     const std::int32_t key_extent = rotated_key_extent(cache.storage);
     for (std::int32_t group = 0; group < kQuantGroups; ++group) {
         std::array<float, kQuantGroup> k_rot{};
@@ -730,7 +744,7 @@ void encode_rotated_row(HostCache& cache, std::span<const float> k, std::span<co
         test::rkv::hadamard64(k_rot);
         test::rkv::hadamard64(v_rot);
         const std::uint16_t k_scale_bits = test::rkv::group_scale_bits(
-            test::rkv::group_absmax(k_rot), packed_k ? 7.0f : 127.0f);
+            test::rkv::group_absmax(k_rot), (packed_k || e8_root) ? 7.0f : 127.0f);
         const std::uint16_t v_scale_bits =
             test::rkv::group_scale_bits(test::rkv::group_absmax(v_rot), 7.0f);
         const float k_scale = test::rkv::half_to_float(k_scale_bits);
@@ -742,8 +756,27 @@ void encode_rotated_row(HostCache& cache, std::span<const float> k, std::span<co
         cache.v_scale[scale_index(geometry, cache.logical_capacity, head, position, group)] =
             v_scale_bits;
 
+        if (e8_root) {
+            for (std::int32_t sub = 0; sub < kQuantGroup / kRotE8Sub; ++sub) {
+                std::array<float, kRotE8Sub> values{};
+                for (std::int32_t i = 0; i < kRotE8Sub; ++i) {
+                    values[static_cast<std::size_t>(i)] =
+                        k_rot[static_cast<std::size_t>(sub * kRotE8Sub + i)];
+                }
+                const test::rkv::CylinderCode code =
+                    test::rkv::encode_cylinder_8d(values, k_scale);
+                const std::int32_t byte = group * (kQuantGroup / 4) + sub * 2;
+                const std::size_t index = logical_plane_index(key_extent, geometry,
+                                                              cache.logical_capacity, head,
+                                                              position, byte);
+                cache.k_rot[index]     = code.root;
+                cache.k_rot[index + 1] = code.rad_axis;
+            }
+        }
         std::array<std::int8_t, kQuantGroup> k_codes{};
-        if (e8_lattice) {
+        if (e8_root) {
+            // Keys are already stored above.
+        } else if (e8_lattice) {
             for (std::int32_t sub = 0; sub < kQuantGroup / kRotE8Sub; ++sub) {
                 std::array<float, kRotE8Sub> values{};
                 for (std::int32_t i = 0; i < kRotE8Sub; ++i) {
@@ -768,7 +801,9 @@ void encode_rotated_row(HostCache& cache, std::span<const float> k, std::span<co
         }
         for (std::int32_t i = 0; i < kQuantGroup; ++i) {
             const std::int32_t d = group * kQuantGroup + i;
-            if (!packed_k) {
+            if (e8_root) {
+                // Keys are already stored above.
+            } else if (!packed_k) {
                 cache.k_rot[logical_plane_index(key_extent, geometry, cache.logical_capacity, head,
                                                 position, d)] =
                     static_cast<std::uint8_t>(k_codes[static_cast<std::size_t>(i)]);
@@ -798,11 +833,32 @@ std::array<double, kHeadDim> decode_rotated_row(const HostCache& cache, bool key
     const std::int32_t extent = key ? rotated_key_extent(cache.storage) : kRotPackedBytes;
     const std::vector<std::uint8_t>& codes = key ? cache.k_rot : cache.v_rot;
     const std::vector<std::uint16_t>& scales = key ? cache.k_scale : cache.v_scale;
+    const bool e8_root = key && cache.storage == KvCacheStorage::RK2V4E8;
     std::array<double, kHeadDim> logical{};
     for (std::int32_t group = 0; group < kQuantGroups; ++group) {
         const double scale = static_cast<double>(f16_bits_to_f32(
             scales[scale_index(geometry, cache.logical_capacity, head, position, group)]));
         std::array<double, kQuantGroup> rotated{};
+        if (e8_root) {
+            for (std::int32_t sub = 0; sub < kQuantGroup / kRotE8Sub; ++sub) {
+                const std::int32_t byte = group * (kQuantGroup / 4) + sub * 2;
+                const std::size_t index = logical_plane_index(extent, geometry,
+                                                              cache.logical_capacity, head,
+                                                              position, byte);
+                const test::rkv::CylinderCode code{codes[index], codes[index + 1], false};
+                const auto decoded = test::rkv::decode_cylinder_8d(code);
+                for (std::int32_t i = 0; i < kRotE8Sub; ++i) {
+                    rotated[static_cast<std::size_t>(sub * kRotE8Sub + i)] =
+                        static_cast<double>(decoded[static_cast<std::size_t>(i)]) * scale;
+                }
+            }
+            hadamard64_double(rotated);
+            for (std::int32_t i = 0; i < kQuantGroup; ++i) {
+                logical[static_cast<std::size_t>(group * kQuantGroup + i)] =
+                    rotated[static_cast<std::size_t>(i)];
+            }
+            continue;
+        }
         for (std::int32_t i = 0; i < kQuantGroup; ++i) {
             const std::int32_t d = group * kQuantGroup + i;
             std::int32_t code    = 0;
@@ -1910,6 +1966,8 @@ const char* cache_name(KvCacheStorage storage) {
         return "rk4v4";
     case KvCacheStorage::RK4V4E8:
         return "rk4v4-e8";
+    case KvCacheStorage::RK2V4E8:
+        return "rk2v4-e8";
     }
     return "unknown";
 }
@@ -1921,6 +1979,7 @@ ReductionCriterion attention_criterion(KvCacheStorage storage) {
     if (storage == KvCacheStorage::Nvfp4Group16) return kAttentionNvfp4Criterion;
     if (storage == KvCacheStorage::Fp8KeyNvfp4Value) return kAttentionK8V4Criterion;
     if (storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) return kAttentionRk8V4Criterion;
+    if (storage == KvCacheStorage::RK2V4E8) return kAttentionRk2V4Criterion;
     if (is_rotated_storage(storage)) return kAttentionRk4V4Criterion;
     throw std::logic_error("unregistered causal-attention test storage");
 }
@@ -2056,8 +2115,10 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
     int failures = verify_attention(label, bf16_bits_to_double(output_bits), reference,
                                     attention_criterion(storage));
     // rk8v4 and rk4v4 have an exact host codec oracle for the fused key write as well; rk4v4-e8
-    // keeps its key representation private because the E8 projection can land on a lattice
-    // boundary that a one-ULP host/device difference flips.
+    // and rk2v4-e8 keep their key representation private because the E8 projection and the
+    // cylinder factorization can land on a boundary that a one-ULP host/device difference flips.
+    // The fused/standalone byte-parity check below still pins those two exactly against the
+    // device's own standalone append.
     failures += verify_cache(label, cache.snapshot(), expected,
                              storage == KvCacheStorage::BFloat16 ||
                                  storage == KvCacheStorage::Nvfp4Group16 ||
@@ -2713,7 +2774,7 @@ int run_rotated_cases() {
     int failures = 0;
     for (const KvCacheStorage storage : {KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
                                          KvCacheStorage::RotatedInt4KeyInt4ValueGroup64,
-                                         KvCacheStorage::RK4V4E8}) {
+                                         KvCacheStorage::RK4V4E8, KvCacheStorage::RK2V4E8}) {
         for (const Geometry& geometry : kGeometries) {
             // T=1 and T=6 stay on the small-T route; T=17 and the 512-key envelope reach the
             // chunked small-T and prompt routes.
