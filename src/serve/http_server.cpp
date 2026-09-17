@@ -4,6 +4,7 @@
 #include "serve/http_transport.h"
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
+#include "serve/web_ui.h"
 
 #include <nlohmann/json.hpp>
 
@@ -361,6 +362,11 @@ void HttpServer::register_routes() {
         if (options_.api_key.empty() || req.path == "/health" || req.method == "OPTIONS") {
             return httplib::Server::HandlerResponse::Unhandled;
         }
+        // The embedded web UI has to load before it can ask for a key: its documents are public,
+        // and every API path, /props included, stays authenticated.
+        if (web_ui_is_public_request(req.method, req.path)) {
+            return httplib::Server::HandlerResponse::Unhandled;
+        }
         // Accept both the OpenAI-style bearer token and the Anthropic-style
         // x-api-key header so OpenAI clients and Claude Code (ANTHROPIC_API_KEY
         // -> x-api-key, ANTHROPIC_AUTH_TOKEN -> Authorization: Bearer) both work.
@@ -487,6 +493,24 @@ void HttpServer::register_routes() {
     server_.Post("/v1/messages", [this](const httplib::Request& req, httplib::Response& res) {
         handle_messages(req, res);
     });
+
+    // Last: the web UI owns a catch-all GET, so every API route above must already be registered.
+    register_web_ui_routes(server_, [this] { return render_props(); });
+}
+
+std::string HttpServer::render_props() const {
+    WebUiPropsInput input;
+    input.options    = &options_;
+    input.model_id   = public_model_id_;
+    input.build_info = "ninfer";
+    ninfer::ModelSamplingDefaults sampling;
+    if (service_ != nullptr) {
+        const ninfer::LoadSummary load = service_->load_summary();
+        if (!load.architecture.empty()) { input.build_info += " (" + load.architecture + ")"; }
+        sampling               = service_->sampling_defaults();
+        input.sampling_defaults = &sampling;
+    }
+    return render_web_ui_props(input);
 }
 
 ExecutorGauges HttpServer::executor_gauges() const {
