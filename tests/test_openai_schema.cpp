@@ -254,12 +254,8 @@ int test_response_format() {
     failures += check(api_error([&] { (void)parse(with_tools); }).code == "response_format_conflict",
                       "a structured response format and tools are exclusive");
 
-    Json with_budget                = base_request();
-    with_budget["response_format"]  = Json{{"type", "json_object"}};
-    with_budget["thinking_budget"]  = 16;
-    failures +=
-        check(api_error([&] { (void)parse(with_budget); }).code == "response_format_conflict",
-              "a structured response format and a thinking budget are exclusive");
+    failures += check(!options(object_request).execution.thinking.budget.has_value(),
+                      "a structured request carries no thinking budget into Engine options");
 #else
     failures += check(api_error([&] { (void)parse(object_body); }).code ==
                           "response_format_not_supported",

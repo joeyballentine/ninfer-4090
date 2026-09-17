@@ -96,15 +96,9 @@ ResponseFormat parse_response_format_object(const RequestJson& format,
 }
 
 void reject_structured_output_conflicts(const GenerationRequest& request) {
-    if (!request.response_format.constrained()) { return; }
-    if (request.thinking_budget) {
-        bad_request("a structured response format cannot be combined with a thinking budget",
-                    "thinking_budget", "response_format_conflict");
-    }
-    if (request.uses_tools()) {
-        bad_request("a structured response format cannot be combined with tool calls",
-                    "tools", "response_format_conflict");
-    }
+    if (!request.response_format.constrained() || !request.uses_tools()) { return; }
+    bad_request("a structured response format cannot be combined with tool calls", "tools",
+                "response_format_conflict");
 }
 
 bool valid_tool_name(std::string_view name, std::size_t maximum_length) noexcept {

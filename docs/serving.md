@@ -193,8 +193,9 @@ A `json_object` or `json_schema` response format is enforced, not requested: the
 into a token-level grammar over the loaded tokenizer, and every sampling decision is masked to the
 ids that grammar licenses. The returned `content` is therefore valid JSON, and schema-conformant
 when a schema is given. Enforcement applies to the whole response, so a structured request has no
-reasoning phase and cannot be combined with `tools` or a `thinking_budget`; those combinations are
-rejected with `response_format_conflict`. `strict` reaches the schema compiler: `true` closes
+reasoning phase, the server's default thinking budget does not apply to it, and it cannot be
+combined with `tools`; that combination is rejected with `response_format_conflict`.
+`strict` reaches the schema compiler: `true` closes
 objects and arrays, so the grammar admits no property or item the schema does not declare. A schema
 the compiler cannot accept is HTTP 400 `response_format_invalid`. A build configured with
 `-DNINFER_ENABLE_STRUCTURED_OUTPUT=OFF` has no grammar backend and rejects every non-text format
@@ -490,7 +491,7 @@ wire response contains typed `output` Items.
 | `reasoning.effort` | `none` requests disabled thinking; other standard effort values pass to the selected template |
 | `chat_template_kwargs` | template parameters as a JSON object; standard options merge with typed fields |
 | `preserve_thinking` | alias for `chat_template_kwargs.preserve_thinking`; conflicting values are rejected |
-| `text.format` | `{"type":"text"}`, `{"type":"json_object"}`, or `{"type":"json_schema","name":…,"schema":…,"strict":…}`; the last two are enforced by grammar-constrained decoding and cannot be combined with `tools` or a thinking budget |
+| `text.format` | `{"type":"text"}`, `{"type":"json_object"}`, or `{"type":"json_schema","name":…,"schema":…,"strict":…}`; the last two are enforced by grammar-constrained decoding and cannot be combined with `tools` |
 | `tools` | direct function definitions or namespace groups containing function definitions; see below |
 | `tool_choice` | `auto`, `none`, or function-only `allowed_tools` with mode `auto`; a namespaced selection carries both `namespace` and `name` |
 | `parallel_tool_calls` | `true` by default; `false` is accepted only when no effective tool is callable |

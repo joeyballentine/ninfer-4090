@@ -28,9 +28,9 @@ bool optional_bool(const RequestJson& object, const char* key, bool fallback);
                                                           std::string_view param,
                                                           std::string_view definition_param);
 
-// A structured response is its grammar's language from the first generated token, so it has no
-// thinking phase to cap and no tool-call grammar to interleave. Reject those combinations at the
-// protocol boundary instead of resolving them silently.
+// A structured response is its grammar's language from the first generated token, so it cannot
+// also carry the tool-call grammar. Reject that combination at the protocol boundary instead of
+// resolving it silently.
 void reject_structured_output_conflicts(const GenerationRequest& request);
 
 } // namespace ninfer::serve
