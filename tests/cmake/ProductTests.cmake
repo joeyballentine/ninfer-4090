@@ -59,3 +59,10 @@ ninfer_add_test(ninfer_http_error_handler_test
 ninfer_add_test(ninfer_http_transport_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_http_transport.cpp"
   LIBRARIES ninfer_serve)
+
+ninfer_add_test(ninfer_serve_ui_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_serve_ui.cpp"
+  LIBRARIES ninfer_serve)
+
+# Returns 77 when NINFER_EMBED_WEBUI is off: the policy still compiles, but there is no table.
+set_tests_properties(ninfer_serve_ui_test PROPERTIES SKIP_RETURN_CODE 77)
