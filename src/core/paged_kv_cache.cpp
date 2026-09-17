@@ -67,6 +67,46 @@ PagedKVBatchLayerView single_row_paged_kv_batch_view(const PagedKVLayerView& cac
     };
 }
 
+KVPageGeometry paged_kv_page_geometry(std::span<const PagedKVStorageLayout> layers,
+                                      std::int32_t num_kv_heads, PagedKVPlaneOrder order,
+                                      std::size_t alignment) {
+    if (layers.empty()) { throw std::invalid_argument("Paged KV geometry has no layers"); }
+    if (num_kv_heads <= 0) {
+        throw std::invalid_argument("Paged KV head count must be positive");
+    }
+    KVPageGeometry geometry;
+    geometry.page_tokens        = static_cast<std::uint32_t>(kPagedKVPageSize);
+    geometry.device_plane_order = order;
+    std::size_t planes          = 0;
+    for (const PagedKVStorageLayout& layer : layers) { planes += layer.planes_per_layer(); }
+    geometry.planes.reserve(planes);
+    for (const PagedKVStorageLayout& layer : layers) {
+        geometry.planes.push_back(
+            {layer.key.data_dtype, layer.key.data_leading_extent, num_kv_heads, alignment});
+        geometry.planes.push_back(
+            {layer.value.data_dtype, layer.value.data_leading_extent, num_kv_heads, alignment});
+        if (layer.key.has_scale()) {
+            geometry.planes.push_back(
+                {layer.key.scale_dtype, layer.key.scale_leading_extent, num_kv_heads, alignment});
+        }
+        if (layer.value.has_scale()) {
+            geometry.planes.push_back({layer.value.scale_dtype, layer.value.scale_leading_extent,
+                                       num_kv_heads, alignment});
+        }
+    }
+    return geometry;
+}
+
+std::size_t paged_kv_plane_base(std::span<const PagedKVStorageLayout> layers,
+                                std::uint32_t layer) {
+    if (layer >= layers.size()) { throw std::out_of_range("Paged KV layer is out of range"); }
+    std::size_t base = 0;
+    for (std::uint32_t index = 0; index < layer; ++index) {
+        base += layers[index].planes_per_layer();
+    }
+    return base;
+}
+
 DeviceKVPagePoolLayout plan_device_kv_page_pool(LayoutBuilder& builder,
                                                 const DeviceKVPagePoolSpec& spec) {
     const std::int32_t physical_pages =

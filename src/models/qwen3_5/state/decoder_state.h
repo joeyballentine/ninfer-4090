@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace ninfer::models::qwen3_5 {
 
@@ -18,7 +19,8 @@ struct DecoderStateSpec {
     std::uint32_t capacity                  = 0;
     std::int32_t kv_heads                   = 0;
     std::int32_t attention_head_dim         = 0;
-    KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
+    // Storage kind per full-attention layer; the MTP pool follows the text stack's tail kind.
+    KvCacheSchedule kv_storage              = KvCacheStorage::BFloat16;
     bool enable_mtp                         = false;
     std::int32_t kv_table_rows              = 1;
     std::uint32_t text_physical_page_groups = 0;
@@ -31,9 +33,16 @@ struct PagedKVCacheLayout {
     std::uint32_t layers      = 0;
     std::uint32_t max_context = 0;
     std::int32_t kv_heads     = 0;
-    PagedKVStorageLayout layer_storage;
+    // One resolved plane schema per layer. Layers may differ, so the pool's per-layer page byte
+    // size differs with them; `payload_bytes()` already sums the independently planned planes.
+    std::vector<PagedKVStorageLayout> layer_storage;
 
     [[nodiscard]] std::size_t payload_bytes() const noexcept { return pages.payload_bytes(); }
+
+    // Physical bytes one token occupies across every layer of this pool.
+    [[nodiscard]] std::size_t bytes_per_token() const {
+        return paged_kv_bytes_per_token(layer_storage, kv_heads);
+    }
 };
 
 class PagedKVCache;
@@ -68,6 +77,8 @@ public:
 
     [[nodiscard]] std::uint32_t layers() const noexcept { return layers_; }
 
+    [[nodiscard]] const PagedKVStorageLayout& layer_storage(std::uint32_t layer) const;
+
     [[nodiscard]] DeviceKVPagePool& page_pool() noexcept { return pages_; }
 
     [[nodiscard]] const DeviceKVPagePool& page_pool() const noexcept { return pages_; }
@@ -91,7 +102,8 @@ private:
     std::uint32_t layers_      = 0;
     std::uint32_t max_context_ = 0;
     std::int32_t kv_heads_     = 0;
-    PagedKVStorageLayout layer_storage_;
+    std::vector<PagedKVStorageLayout> layer_storage_;
+    std::vector<std::size_t> plane_bases_;
 };
 
 struct DecoderStateLayout {

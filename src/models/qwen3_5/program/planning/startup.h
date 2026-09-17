@@ -77,7 +77,7 @@ struct SequencePlanningInputs {
     std::uint32_t prefill_chunk             = 0;
     std::uint32_t draft_window              = 0;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
-    KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
+    KvCacheSchedule kv_storage              = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
     // Vision scratchpad token budget. Zero keeps the architectural maximum.
     std::uint32_t vision_max_tokens = 0;
@@ -101,7 +101,7 @@ struct SequencePlanImpl {
     std::uint32_t prefill_chunk             = 0;
     std::uint32_t draft_window              = 0;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
-    KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
+    KvCacheSchedule kv_storage              = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
     // Vision scratchpad token budget. Zero keeps the architectural maximum.
     std::uint32_t vision_max_tokens = 0;

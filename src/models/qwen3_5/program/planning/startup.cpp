@@ -183,24 +183,13 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
         if (plan.features.masked_draft()) {
             DFlashPersistentLayout& dflash = out.dflash.emplace();
             if (draft->full_layer_count() != 0) {
-                const PagedKVStorageLayout full_storage = paged_kv_storage_layout(
-                    KvCacheStorage::BFloat16, dimension(draft->attention.head_dim));
-                KVPageGeometry full_geometry{
-                    .page_tokens        = kPagedKVPageSize,
-                    .device_plane_order = PagedKVPlaneOrder::HeadMajor,
-                    .planes =
-                        {
-                            {full_storage.key.data_dtype, full_storage.key.data_leading_extent,
-                             dimension(draft->attention.num_key_value_heads), 256},
-                            {full_storage.value.data_dtype, full_storage.value.data_leading_extent,
-                             dimension(draft->attention.num_key_value_heads), 256},
-                        },
-                };
-                const auto planes = full_geometry.planes;
-                for (std::uint32_t layer = 1; layer < draft->full_layer_count(); ++layer) {
-                    full_geometry.planes.insert(full_geometry.planes.end(), planes.begin(),
-                                                planes.end());
-                }
+                // The draft full-attention pool keeps its own BF16 profile for every layer.
+                const std::vector<PagedKVStorageLayout> full_storage =
+                    paged_kv_schedule_layouts(KvCacheStorage::BFloat16, draft->full_layer_count(),
+                                              dimension(draft->attention.head_dim));
+                KVPageGeometry full_geometry = paged_kv_page_geometry(
+                    full_storage, dimension(draft->attention.num_key_value_heads),
+                    PagedKVPlaneOrder::HeadMajor);
                 dflash.full = qwen3_5::PagedKVCacheLayout{
                     .pages = plan_device_kv_page_pool(
                         builder, DeviceKVPagePoolSpec{.page_group_count = physical_pages,
@@ -317,6 +306,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                  std::int32_t batch_size, std::int32_t min_width,
                                  std::int32_t max_width,
                                  ops::CausalAttentionExecutionEnvelope envelope) {
+        std::uint32_t attention_index = 0;
         for (const auto& block : parameters.text.layers) {
             {
                 auto stage = layout.scope();
@@ -331,7 +321,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                 {dimension(config.attention->head_dim),
                                  dimension(config.attention->num_attention_heads),
                                  dimension(config.attention->num_key_value_heads)},
-                                plan.kv_storage, envelope, batch_size, min_width, max_width));
+                                plan.kv_storage.storage_for(attention_index), envelope,
+                                batch_size, min_width, max_width));
+                    ++attention_index;
                     add_scratch(layout, attention->output, first, last);
                 } else {
                     const auto& gdn = std::get<execution::GdnParameters>(block.mixer);
@@ -399,7 +391,8 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                             {dimension(config.attention->head_dim),
                              dimension(config.attention->num_attention_heads),
                              dimension(config.attention->num_key_value_heads)},
-                            plan.kv_storage, envelope, 1, tokens, tokens));
+                            plan.kv_storage.trailing_storage(), envelope, 1, tokens,
+                            tokens));
         (void)workspace::mtp_post_attention(layout, config, tokens);
         mtp_post_mixer(layout, tokens, tokens);
     };
@@ -439,7 +432,8 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                             {dimension(config.attention->head_dim),
                              dimension(config.attention->num_attention_heads),
                              dimension(config.attention->num_key_value_heads)},
-                            plan.kv_storage, text_envelope, 1, 1, 1));
+                            plan.kv_storage.trailing_storage(), text_envelope, 1, 1,
+                            1));
         matrix(layout, DType::BF16, dimension(config.hidden_size), 1);
         matrix(layout, DType::BF16, dimension(config.hidden_size), 1);
         mtp_post_mixer(layout, 1, 1);
@@ -532,7 +526,8 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                     {dimension(config.attention->head_dim),
                                      dimension(config.attention->num_attention_heads),
                                      dimension(config.attention->num_key_value_heads)},
-                                    plan.kv_storage, text_envelope, batch, width, width));
+                                    plan.kv_storage.trailing_storage(), text_envelope,
+                                    batch, width, width));
                 (void)workspace::mtp_post_attention(layout, config, tokens);
                 mtp_post_mixer(layout, tokens, tokens);
             };
@@ -744,17 +739,21 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
     // The rotated packed modes (rk8v4, rk4v4, rk4v4-e8, rk2v4-e8) exist only in the sm_89 i8
     // attention kernels; on any other architecture startup fails before any device memory is
     // reserved.
-    if ((options.kv_cache == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
-         options.kv_cache == KvCacheStorage::RK4V4E8 ||
-         options.kv_cache == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
-         options.kv_cache == KvCacheStorage::RK2V4E8) &&
-        device.compute_capability() != 89) {
+    if (options.kv_cache.requires_sm89() && device.compute_capability() != 89) {
         throw std::invalid_argument("kv-dtype rk8v4/rk4v4/rk4v4-e8/rk2v4-e8 requires compute "
                                     "capability 8.9 (RTX 4090 build)");
     }
     if (!parameters.model.config().text.attention ||
         parameters.model.config().text.full_attention_layers == 0) {
         throw std::invalid_argument("Qwen3.5 Program requires at least one full-attention layer");
+    }
+    // The schedule boundary counts full-attention layers, so it needs the model's layer count;
+    // a boundary at or past that count leaves the second kind unused and is a mistake.
+    if (!options.kv_cache.uniform() &&
+        options.kv_cache.head_layers >= parameters.model.config().text.full_attention_layers) {
+        throw std::invalid_argument(
+            "kv-dtype schedule boundary must be below the model's full-attention layer count (" +
+            std::to_string(parameters.model.config().text.full_attention_layers) + ")");
     }
     if (parameters.model.options() != models::load_options(options)) {
         throw std::invalid_argument(
