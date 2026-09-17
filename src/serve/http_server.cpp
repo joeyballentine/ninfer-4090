@@ -258,23 +258,29 @@ std::shared_ptr<HttpServer::RequestLifecycle> HttpServer::begin_request(RequestL
 void HttpServer::record_request_start(const RequestLogContext& context) {
     request_jsonl_.write_request_start(context);
     operational_log_.request_start(context);
+    metrics_.begin_request(context);
 }
 
 void HttpServer::record_request_rejected(const RequestRejectionLogContext& context) {
     request_jsonl_.write_request_rejected(context);
     operational_log_.request_rejected(context);
+    metrics_.record_rejected();
 }
 
 void HttpServer::record_request_done(const RequestLogContext& context,
                                      const GenerationOutcome& outcome) {
     request_jsonl_.write_request_done(context, outcome);
     operational_log_.request_done(context, outcome);
+    metrics_.end_request(context.id);
+    metrics_.record_done(outcome);
 }
 
 void HttpServer::record_request_failure(const RequestLogContext& context,
                                         const RequestFailure& failure) {
     request_jsonl_.write_request_error(context, failure.machine_message);
     operational_log_.request_failure(context, failure);
+    metrics_.end_request(context.id);
+    metrics_.record_failure(failure);
 }
 
 void HttpServer::record_response_failure(std::uint64_t request_id, const RequestFailure& failure) {
@@ -431,6 +437,12 @@ void HttpServer::register_routes() {
         res.set_content(nlohmann::json{{"status", available ? "ok" : "unavailable"}}.dump(),
                         "application/json");
     });
+    server_.Get("/metrics", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_metrics(req, res);
+    });
+    server_.Get("/slots", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_slots(req, res);
+    });
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
     });
@@ -475,6 +487,25 @@ void HttpServer::register_routes() {
     server_.Post("/v1/messages", [this](const httplib::Request& req, httplib::Response& res) {
         handle_messages(req, res);
     });
+}
+
+ExecutorGauges HttpServer::executor_gauges() const {
+    if (service_ == nullptr) {
+        return ExecutorGauges{.max_concurrency = options_.max_concurrency,
+                              .max_context     = options_.max_context,
+                              .speculative =
+                                  options_.speculative.backend != ninfer::SpeculativeBackend::None};
+    }
+    return make_executor_gauges(options_, service_->runtime_stats());
+}
+
+void HttpServer::handle_metrics(const httplib::Request&, httplib::Response& res) const {
+    res.set_content(metrics_.render(executor_gauges()), "text/plain; version=0.0.4; charset=utf-8");
+}
+
+void HttpServer::handle_slots(const httplib::Request&, httplib::Response& res) const {
+    res.set_content(render_slots_json(executor_gauges(), metrics_.in_flight_snapshot()),
+                    "application/json");
 }
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {

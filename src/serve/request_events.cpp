@@ -13,6 +13,7 @@ RequestLogContext make_request_log_context(std::uint64_t id, std::string protoco
     context.protocol                           = std::move(protocol);
     context.model                              = metadata.model;
     context.stream                             = metadata.stream;
+    context.prompt_tokens                      = prepared.prompt_tokens;
     context.message_count                      = request.messages.size();
     context.media_item_count                   = request.media_item_count();
     context.requested_output_tokens            = request.max_tokens;

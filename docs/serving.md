@@ -55,6 +55,8 @@ selected for this process.
 | Method and path | Behavior |
 |---|---|
 | `GET /health` | Engine readiness |
+| `GET /metrics` | Prometheus text exposition of cumulative serving counters and executor gauges |
+| `GET /slots` | JSON snapshot of the executor's lanes and the accepted pending tail |
 | `GET /v1/models` | configured OpenAI model alias and effective `max_model_len` |
 | `GET /v1/models/{id}` | lookup of the configured alias and effective `max_model_len` |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
@@ -81,6 +83,70 @@ a dead or unacknowledging peer is normally cancelled within about 20 seconds, in
 request is waiting or prefilling. A peer whose TCP stack remains connected and acknowledges data
 cannot be distinguished from a reading application; proxies must close their upstream NInfer
 connection when the downstream client disappears.
+
+### Metrics
+
+`GET /metrics` returns the Prometheus text exposition format (`text/plain; version=0.0.4`) with a
+`# HELP` and `# TYPE` line per family. The counters accumulate at the same terminal request
+boundary that writes the operational and JSONL request records, so a request is counted exactly
+once regardless of protocol or streaming mode. The endpoint requires the API key when `--api-key`
+is set.
+
+| Family | Meaning |
+|---|---|
+| `llamacpp:prompt_tokens_total` | prompt tokens actually evaluated by prefill, excluding tokens served from a reused prefix |
+| `llamacpp:prompt_seconds_total` | prefill wall seconds |
+| `llamacpp:tokens_predicted_total` | completion tokens committed by decode |
+| `llamacpp:tokens_predicted_seconds_total` | decode wall seconds |
+| `ninfer:requests_total` | terminal requests: completed, failed, rejected, or cancelled |
+| `ninfer:requests_failed_total` | terminal requests the server failed or rejected |
+| `ninfer:requests_cancelled_total` | terminal requests whose client disconnected or cancelled |
+| `ninfer:reasoning_tokens_total` | completion tokens attributed to reasoning content |
+| `ninfer:prefix_cache_hit_tokens_total` | prompt tokens served from a reused KV prefix |
+| `ninfer:draft_tokens_total` | speculative draft tokens proposed |
+| `ninfer:draft_accepted_tokens_total` | speculative draft tokens accepted by verification |
+| `llamacpp:requests_processing` | gauge: accepted requests occupying an execution lane |
+| `llamacpp:requests_deferred` | gauge: accepted requests waiting in the ingress FIFO |
+| `ninfer:requests_prefilling` | gauge: lane-resident requests still evaluating their prompt |
+| `ninfer:requests_decode_ready` | gauge: lane-resident requests eligible for the next decode round |
+| `ninfer:requests_materializing` | gauge: requests whose model state is being materialized onto a lane |
+
+The four `llamacpp:` counter families carry llama.cpp's `--metrics` semantics and names, so an
+existing llama.cpp scrape configuration reads this server without changes. The `ninfer:` families
+report prefix reuse and speculative acceptance, which llama.cpp has no equivalent for. Counters
+reset when the process restarts; scrapers are expected to difference them.
+
+The five gauges are read from the Engine's published runtime snapshot at scrape time, not
+recomputed by the HTTP layer, so they report the executor's own occupancy rather than the number of
+open HTTP requests.
+
+### Slots
+
+`GET /slots` reports the executor's lane table. It requires the API key when `--api-key` is set.
+
+```json
+{
+  "slots": [
+    {"id": 0, "state": "processing", "request_id": 7, "protocol": "openai.chat",
+     "model": "qwen3.5", "n_prompt_tokens": 500, "elapsed_seconds": 1.8,
+     "n_ctx": 65536, "speculative": true},
+    {"id": 1, "state": "idle", "request_id": null, "n_prompt_tokens": 0,
+     "n_ctx": 65536, "speculative": true}
+  ],
+  "pending": [],
+  "requests_processing": 1,
+  "requests_deferred": 0
+}
+```
+
+`slots` always has `--max-concurrency` entries. The Engine publishes how many lanes are occupied
+but not which request sits on which lane; because admission is bounded FIFO without preemption, the
+oldest accepted requests are the lane-resident ones and the remainder is reported under `pending`.
+`n_prompt_tokens` is the prompt size resolved at admission. Decode progress is published only to
+the owning request's own stream, so it is not part of this snapshot; use
+`llamacpp:tokens_predicted_total` for aggregate decode throughput.
+
+This endpoint is NInfer's own contract, not llama.cpp's `/slots` shape.
 
 ## OpenAI Chat Completions
 
@@ -668,7 +734,8 @@ positional: a string-form System value, a later array block, or an inline System
 same text remains ordinary prompt content. A `cache_control` marker attached to the consumed block
 is consumed with it rather than moved to adjacent content.
 
-`max_tokens` is optional for local clients and otherwise uses `--default-max-tokens`; a positive
+`max_tokens` is optional for local clients and otherwise uses `--default-max-tokens`, which
+follows `--max-context` unless the operator sets it; a positive
 value is the complete output budget. `max_tokens:0` is rejected because NInfer does not expose a
 completed zero-output cache-prewarm lifecycle. `temperature`, `top_p`, `top_k`, and
 `stop_sequences` enter Engine execution. A matched custom stop is returned as
@@ -738,7 +805,8 @@ curl http://127.0.0.1:8080/v1/messages/count_tokens \
 ## Authentication and CORS
 
 Pass `--api-key VALUE` to require the same value as an OpenAI bearer token or Anthropic
-`x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated.
+`x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated; `GET /metrics` and
+`GET /slots` do not.
 
 ```bash
 curl http://127.0.0.1:8080/v1/models \
@@ -779,7 +847,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..15`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
-| `--default-max-tokens N` | output limit when omitted by a request | `8192` |
+| `--default-max-tokens N` | output limit when omitted by a request | `--max-context` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
 | `--vision` | enable media input and load Vision GPU allocations | off |
 | `--vision-max-tokens N` | Vision scratchpad token capacity; also enables Vision | `8192` |
@@ -963,6 +1031,13 @@ resolves once at startup.
 
 Admission reserves the full prompt-plus-effective-output page entitlement through request
 completion. A request remains queued until a legal resource plan can satisfy that entitlement.
+
+An omitted `--default-max-tokens` resolves to the configured `--max-context`, so a client that
+omits `max_tokens` is not silently truncated at a fixed protocol default. Such a request is
+entitled to the remaining context after its prompt, which is the same entitlement it would receive
+by asking for that many tokens explicitly. When several requests must run concurrently against a
+shared `--kv-capacity`, set `--default-max-tokens` to the output budget the deployment actually
+needs so the per-request entitlement leaves room for `--max-concurrency` lanes.
 
 Each reusable checkpoint contains KV and complete continuation state. At admission, capture, and
 finish boundaries, resource pressure may keep it on Device, move its StateImage and/or KV replicas
