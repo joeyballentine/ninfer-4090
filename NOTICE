@@ -1,0 +1,28 @@
+NInfer RTX 4090 (sm_89) port
+Copyright 2026 the NInfer 4090 contributors
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+This tree is Neroued/ninfer (https://github.com/Neroued/ninfer) with an Ada Lovelace
+(sm_89, GeForce RTX 4090) port layer. The port layer derives from work published under the
+same license by:
+
+- UDPSendToFailed (https://github.com/UDPSendToFailed/ninfer-4090): the original RTX 4090
+  fork; E8 Conway-Sloane lattice KV cache quantization (rk4v4-e8), rotated int4/int8 KV
+  storages, the WDDM evictable-budget residency lock, DirectStorage prompt cache, Ada
+  small-T MMA routes, SM-count-sized launch policies, n-gram prompt-lookup drafting,
+  structured JSON output, embedded WebUI, Prometheus metrics.
+- sergiuszm (https://github.com/sergiuszm/ninfer-4090): sm_89 kernel adaptation of the
+  int8 attention family, rk4v4-e8 integration, GDN cooperative-launch and pairwise
+  reduction fixes.
+- Ambolio (https://github.com/Ambolio/ninfer-4090-windows): the sm_89 layer on upstream
+  v1.0.7 that this tree replays onto v3 master: 48 KiB shared-memory schedules, Blackwell-only
+  kernel exclusions and stubs, Windows MSVC build, OVERLAPPED artifact I/O.
+- natpate (https://github.com/natpate/ninfer-windows) and headpiece747
+  (https://github.com/headpiece747/ninfer-5090-windows): Win32/MSVC portability.
+- Don-Chad (https://github.com/Don-Chad/ninfer-3090): the Ampere (sm_86) port and
+  compatibility bridges the 4090 lineage grew from.
+- nmorgowicz (https://github.com/nmorgowicz/ninfer-windows): --tolerant-tool-calls.
+- dylanbrodiefafard (https://github.com/dylanbrodiefafard/ninfer): incremental host encode.
+
+Model weights are Qwen (Alibaba Cloud); DFlash companion weights are from z-lab.
