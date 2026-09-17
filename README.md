@@ -45,38 +45,125 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTUR
 cmake --build build -j
 ```
 
-What changes on `sm_89`:
+Use the `groupwise-int` artifacts on Ada. The `nvfp4` artifacts need Blackwell FP4 tensor cores;
+on `sm_89` the NVFP4 W4A4 routes and the `nvfp4` / `k8v4` KV cache modes are compiled as stubs
+that fail with a clear error at startup. A v2 `.ninfer` download from before the v3 format is
+upgraded once, in place of a re-download; weights are copied unchanged and the maintained chat
+template is installed:
 
-- Use the `groupwise-int` artifacts (`qwen3_8_27b.ninfer`, `qwen3_6_27b.ninfer`,
-  `qwen3_6_35b_a3b.ninfer`). The `nvfp4` artifacts need Blackwell FP4 tensor cores; on Ada the
-  NVFP4 W4A4 routes and the `nvfp4` / `k8v4` KV cache modes are compiled as stubs that fail with
-  a clear error at startup.
-- Four extra KV cache modes fit long contexts in 24 GB, all sm_89 only: `--kv-dtype rk8v4`
-  (Hadamard-rotated 8-bit keys, 4-bit values; the recommended coding mode below about 200k
-  tokens), `rk4v4` (rotated 4-bit keys and values), `rk4v4-e8` (4-bit keys on the E8 Conway-Sloane
-  lattice, higher key fidelity than `rk4v4`) and `rk2v4-e8` (2-bit E8 cylinder keys for 350k+
-  token contexts). `int8` remains the highest-precision choice when the context fits and now
+```bash
+hf download neroued/Qwen3.8-27B-NInfer qwen3_8_27b.ninfer --local-dir models
+python3 tools/upgrade_ninfer_v2_to_v3.py models/qwen3_8_27b.ninfer models/qwen3_8_27b.v3.ninfer
+```
+
+#### Coding agent, one session, 128k context
+
+`int8` is the highest-precision KV mode and fits 128k tokens with speculation on. MTP with the
+LM-head draft is where code decode speed comes from; prompt lookup drafts from the sequence's own
+history whenever the head has no proposal. `--prompt-cache` keeps computed prefixes on disk, so a
+conversation that resumes after a restart prefills only its new suffix.
+
+```bash
+./build/apps/ninfer-serve models/qwen3_8_27b.v3.ninfer \
+  --kv-dtype int8 --max-context 131072 \
+  --spec mtp --draft-tokens 5 --lm-head-draft \
+  --prefill-chunk 2048 \
+  --prompt-cache
+```
+
+The embedded web UI is served at `http://127.0.0.1:8080/`; OpenAI clients use
+`/v1/chat/completions` and `/v1/responses`, Anthropic clients `/v1/messages`.
+
+#### Agent fan-out, four lanes
+
+Up to eight requests decode in one batch per round. The KV pool is shared across lanes, so a
+wider pool mode (`rk8v4`, 8-bit keys) leaves room for one long parent plus several subagents.
+Set `--default-max-tokens` explicitly: an omitted `max_tokens` otherwise reserves the whole
+remaining context per request and serializes the lanes. Raise the pending timeout above its
+30 second default so queued subagents wait instead of failing.
+
+```bash
+./build/apps/ninfer-serve models/qwen3_8_27b.v3.ninfer \
+  --kv-dtype rk8v4 --max-context 131072 \
+  --max-concurrency 4 --max-pending-requests 32 --pending-timeout-ms 600000 \
+  --default-max-tokens 8192 \
+  --spec mtp --draft-tokens 4 --lm-head-draft \
+  --prompt-cache
+```
+
+#### Long context, 300k tokens and beyond
+
+Two-tier schedules keep 8-bit keys in the first attention layers, where key error compounds, and
+4-bit keys after; `rk4v4-e8` and `rk2v4-e8` trade fidelity for capacity. Ceilings at 7 GiB of KV:
+`int8` about 220k, `rk8v4` 290k, `int8:4,rk4v4-e8` 345k, `rk4v4-e8` 430k, `rk2v4-e8` 560k; with
+MTP loaded, roughly 20% less. Beyond the model's 262,144-token trained window, positions are
+RoPE-scaled, which suits retrieval more than code edits.
+
+```bash
+./build/apps/ninfer-serve models/qwen3_8_27b.v3.ninfer \
+  --kv-dtype int8:4,rk4v4-e8 --max-context 300000 \
+  --spec mtp --draft-tokens 4 --lm-head-draft --prefill-chunk 4096
+```
+
+#### Measure before changing precision
+
+`ninfer-perplexity` scores the fixed corpus; the NInfer C++/CUDA code domain is the number that
+matters for programming use. Compare KV modes with the same artifact, and artifacts with the same
+KV mode:
+
+```bash
+./build/apps/ninfer-perplexity models/qwen3_8_27b.v3.ninfer \
+  --corpus eval/corpora/perplexity-1m/manifest.json --kv-dtype int8
+./build/apps/ninfer-perplexity models/qwen3_8_27b.v3.ninfer \
+  --corpus eval/corpora/perplexity-1m/manifest.json --kv-dtype int8:4,rk4v4-e8
+```
+
+#### FP8 tensor-core prefill (off by default)
+
+Ada's FP8 MMA runs the Q4/Q5 prefill GEMMs at twice the BF16 rate; weights are exact, activations
+are quantized per token. The route is admitted only when the artifact permits 8-bit activations,
+which the official conversion does not. Grant it without touching the weights, then enable the
+switch and compare perplexity and `pp2048` throughput against the default:
+
+```bash
+python3 tools/set_activation_policy.py models/qwen3_8_27b.v3.ninfer \
+  models/qwen3_8_27b.a8.ninfer --policy AllowA8 --text-projections
+./build/apps/ninfer-serve models/qwen3_8_27b.a8.ninfer --kv-dtype int8 --max-context 131072 \
+  --spec mtp --draft-tokens 5 --lm-head-draft --prefill-a8 fp8
+```
+
+Go/no-go criteria and the bench command are in
+[Ada FP8 prefill](docs/maintainer/ada-fp8-prefill.md).
+
+#### A better-quantized artifact for 24 GB
+
+`tools/convert/recipes/qwen3_8_27b_24gb.py` keeps the official formats and kernels but selects
+every Q4/Q5 code by a clip-optimal scale search (GPTQ when calibration Hessians are supplied),
+stores the token embedding at Q6 (0.33 GiB smaller), and permits 8-bit activations. It needs the
+BF16 checkpoint and a GPU; see [weight conversion](docs/weight-conversion.md), including
+`tools/calibrate_hessians.py` and the evaluation protocol.
+
+#### Other `sm_89` notes
+
+- `--kv-dtype` gains `rk8v4`, `rk4v4`, `rk4v4-e8`, `rk2v4-e8` and the two-tier `X:N,Y` form; `int8`
   stores keys under the same D256 rotation contract as the RTX 5090 build.
-- Speculation for code: `--spec mtp --draft-tokens K` accepts K up to 15, and MTP additionally
-  drafts by prompt lookup (repeated n-grams from the sequence's own history) whenever the head has
-  no proposal. DFlash2 (`--spec dflash2`) is available with artifacts that carry the companion
-  weights.
-- Serving: `response_format` (`json_object`, `json_schema`) and Responses `text.format` are
-  enforced by grammar-constrained sampling (xgrammar, `NINFER_ENABLE_STRUCTURED_OUTPUT=ON`), with
-  speculation kept on; `GET /metrics` exposes Prometheus counters and `GET /slots` the executor
-  lanes; an omitted `--default-max-tokens` resolves to `--max-context`.
-- On Windows, `--wddm-evictable-budget` lets a GPU that does not drive the desktop budget against
-  total VRAM minus a 512 MiB display floor. `--vision-max-tokens` caps the Vision workspace
-  (default 8192 tokens). `--tolerant-tool-calls` accepts complete Qwen tool calls followed by
-  trailing text.
-- Existing v2 `.ninfer` downloads must be upgraded once with
-  `tools/upgrade_ninfer_v2_to_v3.py` (see [weight conversion](docs/weight-conversion.md)); the
-  upgrade preserves weights and installs the maintained chat template.
+- `--spec mtp --draft-tokens K` accepts K up to 15. DFlash2 (`--spec dflash2`) works with
+  artifacts that carry the companion weights.
+- `response_format` (`json_object`, `json_schema`) and Responses `text.format` are enforced by
+  grammar-constrained sampling (xgrammar, `NINFER_ENABLE_STRUCTURED_OUTPUT=ON`) with speculation
+  kept on. `GET /metrics` exposes Prometheus counters, `GET /slots` the executor lanes, `GET /props`
+  the web UI's model description. `NINFER_EMBED_WEBUI=OFF` drops the UI and its configure-time
+  download.
+- `--tolerant-tool-calls` accepts complete Qwen tool calls followed by trailing text.
+  `--vision-max-tokens` caps the Vision workspace (default 8192 tokens). On Windows,
+  `--wddm-evictable-budget` lets a GPU that does not drive the desktop budget against total VRAM
+  minus a 512 MiB display floor.
 
-Published performance below is for the RTX 5090. On a 24 GB RTX 4090 with the 16.96 GiB
-`groupwise-int` Qwen3.8-27B artifact, expect about 52 tok/s single-token decode (the card's
-memory-bandwidth ceiling), 100 to 150 tok/s on code with `--spec mtp --lm-head-draft`, and about
-2,100 tok/s prefill.
+Published performance below is for the RTX 5090. On a 24 GB RTX 4090 with the `groupwise-int`
+Qwen3.8-27B artifact, expect about 52 tok/s single-token decode (the card's memory-bandwidth
+ceiling), 100 to 150 tok/s on code with MTP, and about 2,100 tok/s prefill before the FP8 route.
+Nothing on the `sm_89` layer beyond the original fork's measurements has been timed on hardware
+yet; the numbers above are the arithmetic of the memory budget.
 
 Build the product binaries:
 
