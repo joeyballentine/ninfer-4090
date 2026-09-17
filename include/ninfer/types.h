@@ -120,7 +120,8 @@ struct KvCacheSchedule {
 
     [[nodiscard]] constexpr bool uniform() const noexcept { return head_layers == 0; }
 
-    [[nodiscard]] constexpr KvCacheStorage storage_for(std::uint32_t attention_layer) const noexcept {
+    [[nodiscard]] constexpr KvCacheStorage
+    storage_for(std::uint32_t attention_layer) const noexcept {
         return attention_layer < head_layers ? head : tail;
     }
 
@@ -135,13 +136,12 @@ struct KvCacheSchedule {
     // Distinguishes schedules in prefix-reuse identity: KV written under one schedule is not
     // readable as another. Four bits per kind and eight for the boundary fit one 16-bit field.
     [[nodiscard]] constexpr std::uint32_t identity_tag() const noexcept {
-        return static_cast<std::uint32_t>(head) |
-               (static_cast<std::uint32_t>(tail) << 4U) |
+        return static_cast<std::uint32_t>(head) | (static_cast<std::uint32_t>(tail) << 4U) |
                ((head_layers > 255U ? 255U : head_layers) << 8U);
     }
 
-    friend constexpr bool operator==(const KvCacheSchedule&, const KvCacheSchedule&) noexcept =
-        default;
+    friend constexpr bool operator==(const KvCacheSchedule&,
+                                     const KvCacheSchedule&) noexcept = default;
 };
 
 // `X` for a uniform schedule, `X:N,Y` for a two-tier one. `name` selects the spelling, so a log
@@ -163,8 +163,8 @@ template <typename NameFn>
 [[nodiscard]] inline KvCacheSchedule parse_kv_cache_schedule(std::string_view text) {
     const std::size_t colon = text.find(':');
     if (colon == std::string_view::npos) { return KvCacheSchedule(parse_kv_cache_storage(text)); }
-    const std::string_view rest  = text.substr(colon + 1);
-    const std::size_t comma      = rest.find(',');
+    const std::string_view rest = text.substr(colon + 1);
+    const std::size_t comma     = rest.find(',');
     if (comma == std::string_view::npos) {
         throw std::invalid_argument("kv-dtype schedule must be <kind>:<layers>,<kind>: " +
                                     std::string(text));
@@ -311,7 +311,6 @@ struct EngineOptions {
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
     std::uint32_t prefill_chunk        = 1024;
-    // Uniform kind or two-tier per-attention-layer schedule (see KvCacheSchedule).
     KvCacheSchedule kv_cache           = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;

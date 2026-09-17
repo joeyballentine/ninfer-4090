@@ -26,10 +26,10 @@ constexpr std::int32_t kHeadDim          = 256;
 constexpr std::int32_t kKvHeads          = 4;
 
 // Physical bytes per token and KV head, D=256 (code plane + scale plane, K then V).
-constexpr std::size_t kInt8TokenHead    = (256 + 4 * 2) + (256 + 4 * 2);  // 528
-constexpr std::size_t kRk4V4E8TokenHead = (128 + 4 * 2) + (128 + 4 * 2);  // 272
-constexpr std::size_t kRk8V4TokenHead   = (256 + 4 * 2) + (128 + 4 * 2);  // 400
-constexpr std::size_t kRk2V4E8TokenHead = (64 + 4 * 2) + (128 + 4 * 2);   // 208
+constexpr std::size_t kInt8TokenHead    = (256 + 4 * 2) + (256 + 4 * 2); // 528
+constexpr std::size_t kRk4V4E8TokenHead = (128 + 4 * 2) + (128 + 4 * 2); // 272
+constexpr std::size_t kRk8V4TokenHead   = (256 + 4 * 2) + (128 + 4 * 2); // 400
+constexpr std::size_t kRk2V4E8TokenHead = (64 + 4 * 2) + (128 + 4 * 2);  // 208
 
 int failures = 0;
 
@@ -41,16 +41,15 @@ void expect(bool condition, const std::string& message) {
 }
 
 void expect_size(std::size_t actual, std::size_t expected, const std::string& label) {
-    expect(actual == expected, label + ": expected " + std::to_string(expected) + ", got " +
-                                   std::to_string(actual));
+    expect(actual == expected,
+           label + ": expected " + std::to_string(expected) + ", got " + std::to_string(actual));
 }
 
-template <typename Fn> void expect_throws(Fn&& fn, const std::string& label) {
+template <typename Fn>
+void expect_throws(Fn&& fn, const std::string& label) {
     try {
         fn();
-    } catch (const std::exception&) {
-        return;
-    }
+    } catch (const std::exception&) { return; }
     std::cerr << "FAIL: " << label << " was accepted\n";
     ++failures;
 }
@@ -199,11 +198,11 @@ void check_layout_and_capacity(const Expectation& expected) {
                             std::to_string(index) + " device page stride");
             layer_page += plane_page_bytes;
         }
-        expect_size(layer_page,
-                    (layer < expected.head_layers ? expected.head_token_head
-                                                  : expected.tail_token_head) *
-                        kKvHeads * ninfer::kPagedKVPageSize,
-                    label + " layer " + std::to_string(layer) + " page bytes");
+        expect_size(
+            layer_page,
+            (layer < expected.head_layers ? expected.head_token_head : expected.tail_token_head) *
+                kKvHeads * ninfer::kPagedKVPageSize,
+            label + " layer " + std::to_string(layer) + " page bytes");
     }
     expect_size(host.page_stride, bytes_per_token * ninfer::kPagedKVPageSize,
                 label + " host page stride");

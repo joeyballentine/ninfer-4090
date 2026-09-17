@@ -136,9 +136,9 @@ paged_kv_schedule_layouts(const KvCacheSchedule& schedule, std::uint32_t layers,
     }
     std::vector<PagedKVStorageLayout> out;
     out.reserve(layers);
-    const PagedKVStorageLayout head =
-        schedule.uniform() ? PagedKVStorageLayout{}
-                           : paged_kv_storage_layout(schedule.head, head_dim);
+    const PagedKVStorageLayout head = schedule.uniform()
+                                          ? PagedKVStorageLayout{}
+                                          : paged_kv_storage_layout(schedule.head, head_dim);
     const PagedKVStorageLayout tail = paged_kv_storage_layout(schedule.tail, head_dim);
     for (std::uint32_t layer = 0; layer < layers; ++layer) {
         out.push_back(layer < schedule.head_layers ? head : tail);

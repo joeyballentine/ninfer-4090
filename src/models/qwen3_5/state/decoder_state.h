@@ -14,11 +14,11 @@ inline constexpr std::int32_t kKvInt8QuantGroup = 64;
 inline constexpr std::int32_t kKvFp8QuantGroup  = 256;
 
 struct DecoderStateSpec {
-    std::uint32_t full_attention_layers     = 0;
-    std::uint32_t mtp_layers                = 0;
-    std::uint32_t capacity                  = 0;
-    std::int32_t kv_heads                   = 0;
-    std::int32_t attention_head_dim         = 0;
+    std::uint32_t full_attention_layers = 0;
+    std::uint32_t mtp_layers            = 0;
+    std::uint32_t capacity              = 0;
+    std::int32_t kv_heads               = 0;
+    std::int32_t attention_head_dim     = 0;
     // Storage kind per full-attention layer; the MTP pool follows the text stack's tail kind.
     KvCacheSchedule kv_storage              = KvCacheStorage::BFloat16;
     bool enable_mtp                         = false;

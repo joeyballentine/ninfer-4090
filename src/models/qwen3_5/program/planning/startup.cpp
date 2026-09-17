@@ -253,9 +253,9 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
         // whole mask substrate is a few hundred kilobytes and stays resident.
         const auto mask_words = static_cast<std::int32_t>(
             (dimension(parameters.model.resources().public_token_count) + 31) / 32);
-        out.token_masks = add_tensor(
-            builder, DType::I32, {mask_words, static_cast<std::int32_t>(plan.max_concurrency)},
-            "structured-output token masks");
+        out.token_masks = add_tensor(builder, DType::I32,
+                                     {mask_words, static_cast<std::int32_t>(plan.max_concurrency)},
+                                     "structured-output token masks");
     }
     out.bytes = builder.finish(kArenaAlign, "persistent layout");
     out.kv_payload_bytes =
@@ -316,13 +316,12 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     scratch(layout, execution::attention_projection_workspace_bytes(*attention,
                                                                                     first, last));
                     (void)workspace::text_attention_results(layout, config, last);
-                    scratch(layout,
-                            ops::causal_softmax_attention_workspace_capacity_bytes(
-                                {dimension(config.attention->head_dim),
-                                 dimension(config.attention->num_attention_heads),
-                                 dimension(config.attention->num_key_value_heads)},
-                                plan.kv_storage.storage_for(attention_index), envelope,
-                                batch_size, min_width, max_width));
+                    scratch(layout, ops::causal_softmax_attention_workspace_capacity_bytes(
+                                        {dimension(config.attention->head_dim),
+                                         dimension(config.attention->num_attention_heads),
+                                         dimension(config.attention->num_key_value_heads)},
+                                        plan.kv_storage.storage_for(attention_index), envelope,
+                                        batch_size, min_width, max_width));
                     ++attention_index;
                     add_scratch(layout, attention->output, first, last);
                 } else {
@@ -391,8 +390,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                             {dimension(config.attention->head_dim),
                              dimension(config.attention->num_attention_heads),
                              dimension(config.attention->num_key_value_heads)},
-                            plan.kv_storage.trailing_storage(), envelope, 1, tokens,
-                            tokens));
+                            plan.kv_storage.trailing_storage(), envelope, 1, tokens, tokens));
         (void)workspace::mtp_post_attention(layout, config, tokens);
         mtp_post_mixer(layout, tokens, tokens);
     };
@@ -432,8 +430,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                             {dimension(config.attention->head_dim),
                              dimension(config.attention->num_attention_heads),
                              dimension(config.attention->num_key_value_heads)},
-                            plan.kv_storage.trailing_storage(), text_envelope, 1, 1,
-                            1));
+                            plan.kv_storage.trailing_storage(), text_envelope, 1, 1, 1));
         matrix(layout, DType::BF16, dimension(config.hidden_size), 1);
         matrix(layout, DType::BF16, dimension(config.hidden_size), 1);
         mtp_post_mixer(layout, 1, 1);
@@ -526,8 +523,8 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                     {dimension(config.attention->head_dim),
                                      dimension(config.attention->num_attention_heads),
                                      dimension(config.attention->num_key_value_heads)},
-                                    plan.kv_storage.trailing_storage(), text_envelope,
-                                    batch, width, width));
+                                    plan.kv_storage.trailing_storage(), text_envelope, batch, width,
+                                    width));
                 (void)workspace::mtp_post_attention(layout, config, tokens);
                 mtp_post_mixer(layout, tokens, tokens);
             };
@@ -727,7 +724,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                                  : kMaximumVisionItemTokens;
         const std::uint32_t merged         = static_cast<std::uint32_t>(std::min<std::uint64_t>(
             std::min<std::uint64_t>(plan.capacity, kMaximumVisionItemTokens), frontend_limit));
-        out.vision = execution::VisionContext::plan_workspace(
+        out.vision                         = execution::VisionContext::plan_workspace(
             *parameters.model.config().vision, *parameters.vision, merged, out.general_capacity);
         out.capacity = std::max(out.capacity, out.vision->capacity_bytes);
     }

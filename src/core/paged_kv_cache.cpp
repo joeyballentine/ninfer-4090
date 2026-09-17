@@ -71,9 +71,7 @@ KVPageGeometry paged_kv_page_geometry(std::span<const PagedKVStorageLayout> laye
                                       std::int32_t num_kv_heads, PagedKVPlaneOrder order,
                                       std::size_t alignment) {
     if (layers.empty()) { throw std::invalid_argument("Paged KV geometry has no layers"); }
-    if (num_kv_heads <= 0) {
-        throw std::invalid_argument("Paged KV head count must be positive");
-    }
+    if (num_kv_heads <= 0) { throw std::invalid_argument("Paged KV head count must be positive"); }
     KVPageGeometry geometry;
     geometry.page_tokens        = static_cast<std::uint32_t>(kPagedKVPageSize);
     geometry.device_plane_order = order;
@@ -97,8 +95,7 @@ KVPageGeometry paged_kv_page_geometry(std::span<const PagedKVStorageLayout> laye
     return geometry;
 }
 
-std::size_t paged_kv_plane_base(std::span<const PagedKVStorageLayout> layers,
-                                std::uint32_t layer) {
+std::size_t paged_kv_plane_base(std::span<const PagedKVStorageLayout> layers, std::uint32_t layer) {
     if (layer >= layers.size()) { throw std::out_of_range("Paged KV layer is out of range"); }
     std::size_t base = 0;
     for (std::uint32_t index = 0; index < layer; ++index) {

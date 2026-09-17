@@ -27,9 +27,7 @@ ServeOptions parse(std::vector<std::string> arguments) {
 bool rejects(const std::vector<std::string>& arguments) {
     try {
         (void)parse(arguments);
-    } catch (const std::exception&) {
-        return true;
-    }
+    } catch (const std::exception&) { return true; }
     return false;
 }
 
