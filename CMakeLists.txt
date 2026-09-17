@@ -20,6 +20,10 @@ project(ninfer LANGUAGES C CXX CUDA)
 option(NINFER_BUILD_APPS "Build the NInfer CLI, server and perplexity evaluator" ON)
 option(BUILD_TESTING "Build NInfer tests" OFF)
 option(NINFER_BUILD_BENCHMARKS "Build NInfer benchmarks" OFF)
+# Structured JSON output (OpenAI response_format / Responses text.format) compiles the requested
+# schema into a token-level automaton. OFF drops the dependency and the enforcement together; the
+# serving layer then rejects every non-text format with response_format_not_supported again.
+option(NINFER_ENABLE_STRUCTURED_OUTPUT "Enforce grammar-constrained JSON output" ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
