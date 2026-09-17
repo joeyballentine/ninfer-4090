@@ -17,6 +17,18 @@ namespace ninfer::ops {
 
 inline constexpr int kSparseSpeculativeCandidates = 16;
 
+// A verification round only knows the grammar state of its first column: that is the state after
+// the last committed token. Columns beyond it depend on drafts that may still be rejected, so they
+// are verified unconstrained and the caller truncates acceptance at the first token its matcher
+// rejects. A masked row therefore leaves the raw target-token fast paths, whose target argmax was
+// computed without the mask, and runs the licensed sampling route for every column.
+__device__ __forceinline__ SamplingConfig speculative_column_config(const SamplingConfig& row,
+                                                                    int column) {
+    SamplingConfig out = row;
+    if (column != 0) { out.token_mask = nullptr; }
+    return out;
+}
+
 __global__ void speculative_prepare_verify_inputs_kernel(const std::int32_t* anchors,
                                                          const std::int32_t* drafts,
                                                          const std::int32_t* base_positions,
@@ -244,8 +256,9 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_draft
     const __nv_bfloat16* row_logits =
         logits + static_cast<std::int64_t>(row) * cols * physical_rows;
     const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f;
+    const bool masked    = cfg.token_mask != nullptr;
 
-    if (!(cfg.temperature > 0.0f) && !penalties) {
+    if (!(cfg.temperature > 0.0f) && !penalties && !masked) {
         if (tid == 0) {
             int a = 0;
             while (a < extent && row_targets[a] == row_drafts[a]) { ++a; }
@@ -284,12 +297,13 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_draft
 
     if (!(cfg.temperature > 0.0f)) {
         for (int i = 0; i <= extent; ++i) {
-            const std::int64_t base = static_cast<std::int64_t>(i) * physical_rows;
-            float best_value        = -CUDART_INF_F;
-            int best_index          = INT_MAX;
+            const SamplingConfig column_cfg = speculative_column_config(cfg, i);
+            const std::int64_t base         = static_cast<std::int64_t>(i) * physical_rows;
+            float best_value                = -CUDART_INF_F;
+            int best_index                  = INT_MAX;
             for (int v = tid; v < token_domain; v += blockDim.x) {
                 const float value = sampling_adjusted_logit(__bfloat162float(row_logits[base + v]),
-                                                            v, cfg, row_drafts, i);
+                                                            v, column_cfg, row_drafts, i);
                 if (sampling_better(value, v, best_value, best_index)) {
                     best_value = value;
                     best_index = v;
@@ -331,14 +345,16 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_draft
     for (int i = 0; i <= extent; ++i) {
         // Column i is only reached when drafts[0..i-1] were all accepted, so the
         // round-local penalty overlay for this column is exactly those i drafts.
-        const std::int64_t base = static_cast<std::int64_t>(i) * physical_rows;
+        const SamplingConfig column_cfg = speculative_column_config(cfg, i);
+        const std::int64_t base         = static_cast<std::int64_t>(i) * physical_rows;
         if (token_domain <= kSamplerTileItems) {
-            sampling_build_truncated_small(row_logits, base, token_domain, cfg, red_val, red_idx,
-                                           cand_val, cand_idx, prob, &n_support, row_drafts, i);
+            sampling_build_truncated_small(row_logits, base, token_domain, column_cfg, red_val,
+                                           red_idx, cand_val, cand_idx, prob, &n_support,
+                                           row_drafts, i);
         } else {
-            sampling_build_truncated_block_fast(row_logits, base, token_domain, cfg, merge_val,
-                                                merge_idx, cand_val, cand_idx, prob, &n_support,
-                                                row_drafts, i);
+            sampling_build_truncated_block_fast(row_logits, base, token_domain, column_cfg,
+                                                merge_val, merge_idx, cand_val, cand_idx, prob,
+                                                &n_support, row_drafts, i);
         }
         if (tid == 0 && done_sh == 0) {
             const int L = L_sh;
@@ -392,10 +408,11 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_sampling_partial_to
     int extent        = current_extents[row];
     extent            = extent < 0 ? 0 : (extent > k ? k : extent);
     if (col > extent) { return; }
-    const SamplingConfig cfg = configs[row];
+    const bool row_masked    = configs[row].token_mask != nullptr;
+    const SamplingConfig cfg = speculative_column_config(configs[row], col);
     const bool greedy        = !(cfg.temperature > 0.0f);
     const bool penalties     = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f;
-    if ((greedy && !penalties) || token_domain <= kSamplerTileItems) { return; }
+    if ((greedy && !penalties && !row_masked) || token_domain <= kSamplerTileItems) { return; }
     workspace = speculative_workspace_row(workspace, workspace_row_stride, row);
     if (partial == 0 && threadIdx.x == 0) {
         workspace.group_done[col] = 0;
@@ -409,7 +426,7 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_sampling_partial_to
     const std::int64_t base        = (static_cast<std::int64_t>(row) * cols + col) * physical_rows;
     const std::int32_t* row_drafts = drafts + row * k;
     const int tile_start           = partial * kSamplerPartialTileItems;
-    if (!penalties) {
+    if (!penalties && cfg.token_mask == nullptr) {
         unsigned int keys[kSamplerItemsPerThread];
 #pragma unroll
         for (int item = 0; item < kSamplerItemsPerThread; ++item) {
@@ -470,7 +487,8 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group
     int extent      = current_extents[row];
     extent          = extent < 0 ? 0 : (extent > k ? k : extent);
     if (col > extent) { return; }
-    const SamplingConfig cfg        = configs[row];
+    const bool row_masked           = configs[row].token_mask != nullptr;
+    const SamplingConfig cfg        = speculative_column_config(configs[row], col);
     const std::int32_t* row_targets = target_tokens + row * cols;
     const std::int32_t* row_drafts  = drafts + row * k;
     std::int32_t* row_tokens        = licensed_tokens + row * cols;
@@ -478,7 +496,7 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group
     const bool greedy    = !(cfg.temperature > 0.0f);
     const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f;
 
-    if (greedy && !penalties) {
+    if (greedy && !penalties && !row_masked) {
         if constexpr (SparseProposal) {
             if (tid < 32 && col == 0 && group == 0)
                 speculative_sparse_warp_greedy(target_tokens, drafts, lengths, anchors,

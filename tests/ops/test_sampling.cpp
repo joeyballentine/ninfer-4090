@@ -15,6 +15,7 @@
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -43,7 +44,7 @@ bool same_config(const ops::SamplingConfig& a, const ops::SamplingConfig& b) {
     return a.temperature == b.temperature && a.top_k == b.top_k && a.top_p == b.top_p &&
            a.min_p == b.min_p && a.presence_penalty == b.presence_penalty &&
            a.frequency_penalty == b.frequency_penalty && a.seed == b.seed &&
-           a.token_counts == b.token_counts;
+           a.token_counts == b.token_counts && a.token_mask == b.token_mask;
 }
 
 std::vector<std::uint16_t> bf16_bits(const std::vector<float>& values) {
@@ -143,12 +144,23 @@ Distribution distribution_oracle(const std::vector<float>& column, int token_dom
 RunResult run_batch(const std::vector<float>& logits, int physical_rows, int token_domain,
                     std::vector<ops::SamplingConfig> configs,
                     const std::vector<int>& logical_positions, int purpose,
-                    const std::vector<std::vector<int>>& initial_counts = {}) {
+                    const std::vector<std::vector<int>>& initial_counts          = {},
+                    const std::vector<std::vector<std::uint32_t>>& token_masks   = {}) {
     const int batch = static_cast<int>(configs.size());
     if (batch <= 0 || logical_positions.size() != configs.size() ||
         logits.size() != static_cast<std::size_t>(physical_rows) * configs.size() ||
-        (!initial_counts.empty() && initial_counts.size() != configs.size())) {
+        (!initial_counts.empty() && initial_counts.size() != configs.size()) ||
+        (!token_masks.empty() && token_masks.size() != configs.size())) {
         throw std::invalid_argument("invalid sample batch fixture");
+    }
+    std::vector<DeviceBuffer> device_masks;
+    device_masks.reserve(token_masks.size());
+    for (std::size_t row = 0; row < token_masks.size(); ++row) {
+        if (token_masks[row].size() != static_cast<std::size_t>((token_domain + 31) / 32)) {
+            throw std::invalid_argument("invalid sample token-mask fixture");
+        }
+        device_masks.push_back(to_device(token_masks[row]));
+        configs[row].token_mask = static_cast<const std::uint32_t*>(device_masks.back().p);
     }
     const std::vector<std::uint16_t> input_bits = bf16_bits(logits);
     DeviceBuffer device_logits                  = to_device(input_bits);
@@ -591,6 +603,56 @@ int workspace_route_boundary_contract() {
     return failures;
 }
 
+// One bitmask word per 32 ids; only `allowed` is licensed.
+std::vector<std::uint32_t> single_token_mask(int token_domain, int allowed) {
+    std::vector<std::uint32_t> mask(static_cast<std::size_t>((token_domain + 31) / 32), 0U);
+    mask[static_cast<std::size_t>(allowed) >> 5] |= 1U << (static_cast<unsigned>(allowed) & 31U);
+    return mask;
+}
+
+// The licensed id wins on both sampling routes even though an unmasked id has the larger logit,
+// and the greedy and stochastic paths agree because the masked support has one member.
+int token_mask_contract(int token_domain) {
+    std::vector<float> logits(static_cast<std::size_t>(token_domain) * 2, 0.0f);
+    logits[9]                 = 8.0f;  // Best unmasked id for the greedy row.
+    logits[42]                = 4.0f;  // Best licensed id.
+    logits[token_domain + 9]  = 8.0f;
+    logits[token_domain + 42] = 4.0f;
+    const std::vector<std::uint32_t> mask = single_token_mask(token_domain, 42);
+
+    ops::SamplingConfig greedy{};
+    ops::SamplingConfig stochastic{};
+    stochastic.temperature = 1.0f;
+    stochastic.seed        = 17;
+    const RunResult result =
+        run_batch(logits, token_domain, token_domain, {greedy, stochastic}, {0, 0},
+                  ops::kSamplePurposeDecode, {}, {mask, mask});
+
+    const std::string label = "sample token mask V=" + std::to_string(token_domain);
+    int failures            = result.integrity_failures;
+    failures += verify_exact(label.c_str(), result.tokens, {42, 42});
+    return failures;
+}
+
+// With penalties active the mask must still win: a masked id is -inf before the penalty applies.
+int token_mask_with_penalties_contract() {
+    constexpr int token_domain = 257;
+    std::vector<float> logits(static_cast<std::size_t>(token_domain), 0.0f);
+    logits[9]  = 8.0f;
+    logits[42] = 4.0f;
+    std::vector<int> counts(static_cast<std::size_t>(token_domain), 0);
+    counts[42] = 3; // A penalty large enough to lose to token 9 if the mask were ignored.
+
+    ops::SamplingConfig config{};
+    config.frequency_penalty = 1.0f;
+    const RunResult result =
+        run_batch(logits, token_domain, token_domain, {config}, {0}, ops::kSamplePurposeDecode,
+                  {counts}, {single_token_mask(token_domain, 42)});
+    int failures = result.integrity_failures;
+    failures += verify_exact("sample token mask with penalties", result.tokens, {42});
+    return failures;
+}
+
 int increment_counts_contract() {
     const std::vector<std::int32_t> ids{1, 3, 1, 7};
     const std::vector<std::int32_t> initial{0, 2, 0, 4, 0, 0, 0, 1};
@@ -641,6 +703,9 @@ int main() {
     failures += real_shape_distribution_contract();
     failures += rng_key_contract();
     failures += workspace_route_boundary_contract();
+    failures += token_mask_contract(257);
+    failures += token_mask_contract(2048);
+    failures += token_mask_with_penalties_contract();
     failures += increment_counts_contract();
 
     std::cout << (failures == 0 ? "OK" : "FAIL") << " sample public contract\n";
