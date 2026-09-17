@@ -179,13 +179,13 @@ fifteen is the deepest window for all three. Both masked-draft backends may be c
   --lm-head-draft
 ```
 
-MTP additionally drafts by prompt lookup, with no extra weights, memory or options. Before each
-round the Program looks for the most recent earlier occurrence of the sequence's current tail in
-its own committed tokens, trying n-gram orders five, four and three, longest order first, and
-drafts the tokens that followed that occurrence. A match replaces the MTP head's proposal for that
-round and the target verifies it exactly like any other draft, so acceptance stays exact. It pays
-off when the output repeats the prompt or itself, which is common in code editing and structured
-output.
+MTP additionally drafts by prompt lookup, with no extra weights, memory or options. When a round
+starts without a proposal from the MTP head (the first round after prefill, or after every draft
+of the previous round was rejected), the Program looks for the most recent earlier occurrence of
+the sequence's current tail in its own committed tokens, trying n-gram orders five, four and three,
+longest order first, and drafts the tokens that followed that occurrence. The target verifies the
+draft exactly like any other, so acceptance stays exact. It pays off when the output repeats the
+prompt or itself, which is common in code editing and structured output.
 
 For DFlash:
 

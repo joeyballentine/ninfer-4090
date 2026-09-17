@@ -457,15 +457,18 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence       = active_sequence(lanes[row]);
             const RequestControl& request = requests[lanes[row]];
-            // Prompt lookup. A repeated n-gram in this sequence's own history predicts its
-            // continuation without any draft weights, so it replaces the MTP head's proposal
-            // whenever it matches. The head re-proposes from the accepted hidden state at the
-            // end of every round, so a replaced proposal is never reused.
-            if (const PromptLookupDraft lookup =
+            // Prompt lookup. When the MTP head left this round without a proposal (first round
+            // after prefill, or every draft of the previous round was rejected), a repeated
+            // n-gram in the sequence's own history supplies the draft instead of decoding one
+            // token at a time. The head's own proposal, when present, is kept: its measured
+            // acceptance on code is higher than an n-gram continuation's.
+            if (sequence.mtp_draft_count == 0) {
+                const PromptLookupDraft lookup =
                     find_prompt_lookup_draft(sequence.ledger, draft_window);
-                lookup.count != 0) {
-                sequence.mtp_draft_count = lookup.count;
-                std::copy_n(lookup.tokens.begin(), lookup.count, sequence.mtp_drafts.begin());
+                if (lookup.count != 0) {
+                    sequence.mtp_draft_count = lookup.count;
+                    std::copy_n(lookup.tokens.begin(), lookup.count, sequence.mtp_drafts.begin());
+                }
             }
             const std::uint32_t frontier      = sequence.execution_frontier;
             const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1

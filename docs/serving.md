@@ -998,12 +998,13 @@ An appended mid-conversation system message is an ordinary prompt suffix, so an 
 history remains eligible for `private_endpoint`. If the client modifies, removes, or moves a
 historical system message, the token prefix genuinely differs and a miss/reset is correct.
 
-`--spec mtp` also drafts by prompt lookup, with no extra weights, memory or request options. Before
-each round the Program looks for the most recent earlier occurrence of the sequence's current tail
-in its own committed tokens, trying n-gram orders five, four and three, longest order first, and
-drafts the tokens that followed that occurrence. A match replaces the MTP head's proposal for that
-round and the target verifies it exactly like any other draft; accepted tokens and the speculative
-counters keep their existing meaning.
+`--spec mtp` also drafts by prompt lookup, with no extra weights, memory or request options. When
+a round starts without a proposal from the MTP head (the first round after prefill, or after every
+draft of the previous round was rejected), the Program looks for the most recent earlier occurrence
+of the sequence's current tail in its own committed tokens, trying n-gram orders five, four and
+three, longest order first, and drafts the tokens that followed that occurrence. The target
+verifies it exactly like any other draft; accepted tokens and the speculative counters keep their
+existing meaning.
 
 Speculative backends preserve protocol output shapes, stop behavior, and usage accounting. If a stop
 truncates a multi-token MTP, DFlash or DFlash2 round, the Engine commits the exact accepted target prefix so
