@@ -175,7 +175,14 @@ suite 调用顺序运行全部 point：
 ./build/bench/ninfer_linear_bench --suite qwen3_6_27b
 ./build/bench/ninfer_linear_bench --suite qwen3_6_35b_a3b
 ./build/bench/ninfer_linear_bench --suite all
+./build/bench/ninfer_linear_bench --suite ada_fp8_prefill --prefill-a8 off
+./build/bench/ninfer_linear_bench --suite ada_fp8_prefill --prefill-a8 fp8
 ```
+
+`ada_fp8_prefill` 以 `--policy a8` 运行 sm_89 E4M3 prefill route 已注册的九个 27B
+prefill geometry；`--prefill-a8 off` 时同样的点解析到 BF16 MMA route，因此两次运行
+只在被选中的 implementation 上不同。参见
+[Ada FP8 prefill](ada-fp8-prefill.md)。
 
 无参数运行仍打印 usage，不隐式启动重型 suite。suite 是显式 convenience，不是
 correctness matrix、完整 artifact inventory 或第二份 production admission registry。
@@ -190,6 +197,7 @@ suite entry 使用两种固定采样类：
 |---|---|---|
 | `Continuous` | `1,16,128,1024` | 同时观察小 T 带宽阶段、route 过渡和大 T 计算阶段 |
 | `VisionStep4` | `4,128,1024` | 对所有当前 Vision geometries 都合法的保守公共采样 |
+| `Prefill` | `128,512,2048` | route 边界加两个 prefill anchor，仅用于 `ada_fp8_prefill` |
 
 这些点不是 production route boundary 的副本，也不尝试覆盖每个 selector case。完整
 连续 seam 检查由显式 `--sweep` 完成。
