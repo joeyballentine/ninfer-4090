@@ -47,6 +47,146 @@ enum class KvCacheStorage : std::uint8_t {
     RK2V4E8,
 };
 
+// Canonical `--kv-dtype` spelling of one storage kind.
+[[nodiscard]] constexpr const char* kv_cache_storage_name(KvCacheStorage storage) noexcept {
+    switch (storage) {
+    case KvCacheStorage::BFloat16:
+        return "bf16";
+    case KvCacheStorage::Int8Group64:
+        return "int8";
+    case KvCacheStorage::Fp8E4M3Row256:
+        return "fp8";
+    case KvCacheStorage::Nvfp4Group16:
+        return "nvfp4";
+    case KvCacheStorage::Fp8KeyNvfp4Value:
+        return "k8v4";
+    case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+        return "rk4v4";
+    case KvCacheStorage::RK4V4E8:
+        return "rk4v4-e8";
+    case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
+        return "rk8v4";
+    case KvCacheStorage::RK2V4E8:
+        return "rk2v4-e8";
+    }
+    return "unknown";
+}
+
+// The rotated packed family only exists in the sm_89 INT8 attention kernels.
+[[nodiscard]] constexpr bool kv_cache_storage_requires_sm89(KvCacheStorage storage) noexcept {
+    return storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
+           storage == KvCacheStorage::RK4V4E8 ||
+           storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
+           storage == KvCacheStorage::RK2V4E8;
+}
+
+[[nodiscard]] inline KvCacheStorage parse_kv_cache_storage(std::string_view text) {
+    if (text == "bf16") { return KvCacheStorage::BFloat16; }
+    if (text == "int8") { return KvCacheStorage::Int8Group64; }
+    if (text == "fp8") { return KvCacheStorage::Fp8E4M3Row256; }
+    if (text == "nvfp4") { return KvCacheStorage::Nvfp4Group16; }
+    if (text == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
+    if (text == "rk4v4") { return KvCacheStorage::RotatedInt4KeyInt4ValueGroup64; }
+    if (text == "rk4v4-e8") { return KvCacheStorage::RK4V4E8; }
+    if (text == "rk8v4") { return KvCacheStorage::RotatedInt8KeyInt4ValueGroup64; }
+    if (text == "rk2v4-e8") { return KvCacheStorage::RK2V4E8; }
+    throw std::invalid_argument("invalid kv-dtype: " + std::string(text));
+}
+
+// Storage kind per KV-bearing layer. Indices count full-attention layers only: the interleaved
+// GDN layers hold a fixed recurrent state and never reach a paged pool. `head_layers == 0` is the
+// uniform schedule, which resolves to `tail` everywhere and reproduces single-kind planning
+// exactly. A two-tier schedule gives the first `head_layers` attention layers `head` so early
+// key-quantization error, which every later layer inherits, stays small while the tail layers pay
+// the cheaper representation.
+struct KvCacheSchedule {
+    KvCacheStorage head       = KvCacheStorage::BFloat16;
+    KvCacheStorage tail       = KvCacheStorage::BFloat16;
+    std::uint32_t head_layers = 0;
+
+    constexpr KvCacheSchedule() noexcept = default;
+
+    // Implicit: one storage kind is a complete schedule.
+    constexpr KvCacheSchedule(KvCacheStorage uniform) noexcept : head(uniform), tail(uniform) {}
+
+    KvCacheSchedule(KvCacheStorage head_storage, std::uint32_t attention_layers,
+                    KvCacheStorage tail_storage)
+        : head(head_storage), tail(tail_storage),
+          head_layers(head_storage == tail_storage ? 0U : attention_layers) {
+        if (attention_layers == 0) {
+            throw std::invalid_argument("KV-cache schedule head layer count must be positive");
+        }
+    }
+
+    [[nodiscard]] constexpr bool uniform() const noexcept { return head_layers == 0; }
+
+    [[nodiscard]] constexpr KvCacheStorage storage_for(std::uint32_t attention_layer) const noexcept {
+        return attention_layer < head_layers ? head : tail;
+    }
+
+    // Kind for pools that follow the text stack, such as the MTP layer.
+    [[nodiscard]] constexpr KvCacheStorage trailing_storage() const noexcept { return tail; }
+
+    [[nodiscard]] constexpr bool requires_sm89() const noexcept {
+        return kv_cache_storage_requires_sm89(tail) ||
+               (!uniform() && kv_cache_storage_requires_sm89(head));
+    }
+
+    // Distinguishes schedules in prefix-reuse identity: KV written under one schedule is not
+    // readable as another. Four bits per kind and eight for the boundary fit one 16-bit field.
+    [[nodiscard]] constexpr std::uint32_t identity_tag() const noexcept {
+        return static_cast<std::uint32_t>(head) |
+               (static_cast<std::uint32_t>(tail) << 4U) |
+               ((head_layers > 255U ? 255U : head_layers) << 8U);
+    }
+
+    friend constexpr bool operator==(const KvCacheSchedule&, const KvCacheSchedule&) noexcept =
+        default;
+};
+
+// `X` for a uniform schedule, `X:N,Y` for a two-tier one. `name` selects the spelling, so a log
+// with its own storage vocabulary keeps it and a uniform schedule still prints exactly what a
+// single kind printed before.
+template <typename NameFn>
+[[nodiscard]] std::string kv_cache_schedule_spec(const KvCacheSchedule& schedule, NameFn name) {
+    if (schedule.uniform()) { return std::string(name(schedule.tail)); }
+    return std::string(name(schedule.head)) + ':' + std::to_string(schedule.head_layers) + ',' +
+           std::string(name(schedule.tail));
+}
+
+[[nodiscard]] inline std::string kv_cache_schedule_spec(const KvCacheSchedule& schedule) {
+    return kv_cache_schedule_spec(schedule, kv_cache_storage_name);
+}
+
+// Parses `X` or `X:N,Y`. The attention-layer count is a model property, so only N >= 1 is checked
+// here; startup rejects a boundary at or past the model's attention-layer count.
+[[nodiscard]] inline KvCacheSchedule parse_kv_cache_schedule(std::string_view text) {
+    const std::size_t colon = text.find(':');
+    if (colon == std::string_view::npos) { return KvCacheSchedule(parse_kv_cache_storage(text)); }
+    const std::string_view rest  = text.substr(colon + 1);
+    const std::size_t comma      = rest.find(',');
+    if (comma == std::string_view::npos) {
+        throw std::invalid_argument("kv-dtype schedule must be <kind>:<layers>,<kind>: " +
+                                    std::string(text));
+    }
+    const std::string_view digits = rest.substr(0, comma);
+    if (digits.empty() || digits.size() > 9 ||
+        digits.find_first_not_of("0123456789") != std::string_view::npos) {
+        throw std::invalid_argument("kv-dtype schedule layer count is not a number: " +
+                                    std::string(text));
+    }
+    std::uint32_t layers = 0;
+    for (const char digit : digits) {
+        layers = layers * 10U + static_cast<std::uint32_t>(digit - '0');
+    }
+    if (layers == 0) {
+        throw std::invalid_argument("kv-dtype schedule layer count must be positive: " +
+                                    std::string(text));
+    }
+    return KvCacheSchedule(parse_kv_cache_storage(text.substr(0, colon)), layers,
+                           parse_kv_cache_storage(rest.substr(comma + 1)));
+}
+
 enum class EnginePurpose : std::uint8_t {
     Generation,
     CausalScoring,
@@ -171,7 +311,8 @@ struct EngineOptions {
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
     std::uint32_t prefill_chunk        = 1024;
-    KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
+    // Uniform kind or two-tier per-attention-layer schedule (see KvCacheSchedule).
+    KvCacheSchedule kv_cache           = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes  = kDefaultMediaLiveBytes;
@@ -882,7 +1023,7 @@ struct MemorySummary {
     std::uint32_t kv_capacity                 = 0; // Resolved page-aligned Main KV capacity.
     std::uint32_t kv_capacity_page_groups     = 0;
     std::uint32_t kv_capacity_max_page_groups = 0;
-    KvCacheStorage kv_cache                   = KvCacheStorage::BFloat16;
+    KvCacheSchedule kv_cache                  = KvCacheStorage::BFloat16;
     ArenaMemorySummary weights;
     ArenaMemorySummary sequence;
     ArenaMemorySummary workspace;

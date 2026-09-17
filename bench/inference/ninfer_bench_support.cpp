@@ -697,7 +697,8 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         << "    \"kv_capacity_page_groups\": " << env.memory.kv_capacity_page_groups << ",\n"
         << "    \"kv_capacity_max_page_groups\": " << env.memory.kv_capacity_max_page_groups
         << ",\n"
-        << "    \"kv_cache\": \"" << kv_cache_name(env.memory.kv_cache) << "\",\n";
+        << "    \"kv_cache\": \""
+        << ninfer::kv_cache_schedule_spec(env.memory.kv_cache, kv_cache_name) << "\",\n";
     append_arena_json(out, "weights", env.memory.weights, "    ", true);
     append_arena_json(out, "sequence", env.memory.sequence, "    ", true);
     append_arena_json(out, "workspace", env.memory.workspace, "    ", true);
