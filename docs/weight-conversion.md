@@ -72,7 +72,8 @@ deployment instead, may depend on calibration data you produce, and are selected
 |---|---|
 | [`qwen3_8_27b_24gb.py`](../tools/convert/recipes/qwen3_8_27b_24gb.py) | Qwen3.8-27B on one 24 GB card, tuned for coding accuracy |
 
-`qwen3_8_27b_24gb` starts from `qwen3_8_27b` and changes only the Text representation:
+`qwen3_8_27b_24gb` starts from `qwen3_8_27b` and changes only the Text representation and
+its activation permissions:
 
 - the 248,320 x 5,120 token embedding moves from Q8 to Q6. The embedding is a gather, not a matmul,
   so the narrower codes cost no arithmetic, and the artifact loses 357,780,480 bytes: 1.258 GiB at
@@ -82,9 +83,13 @@ deployment instead, may depend on calibration data you produce, and are selected
   and the Q6 `n248320_k5120` linear shape;
 - the output head stays at Q8, where full-vocabulary logit margins are worth the bytes;
 - every Q4 and Q5 Text-layer projection selects its codes with `grouped_mse`, or with
-  `grouped_gptq` when `--calibration` supplies Hessians.
+  `grouped_gptq` when `--calibration` supplies Hessians;
+- those same projections carry `activation_policy="AllowA8"`, which permits the sm_89 FP8 prefill
+  route on an RTX 4090. It permits it only: A16 stays the default compute, and the runtime still
+  needs [`--prefill-a8 fp8`](cli.md#common-options). Stored weights are identical either way.
 
-Vision, MTP and DFlash2 keep the official assignments.
+Vision, MTP and DFlash2 keep the official assignments, and the vocabulary matrices keep the default
+`A16Only`.
 
 ```bash
 python3 tools/calibrate_hessians.py \
@@ -307,6 +312,37 @@ An NVFP4 A4 input requires a positive finite activation divisor. `import_encoded
 the selected source, or a recipe supplies it through
 `recipe.use(..., auxiliaries={"activation_input_divisor": value})`. Shared weights retain separate
 Use records; sharing weights does not share calibration implicitly.
+
+## Permit 8-bit activations on an existing artifact
+
+Activation permissions live in the artifact's Use records, so an artifact converted before a route
+existed keeps `A16Only` until those records are rewritten.
+`tools/set_activation_policy.py` rewrites them instead of reconverting: it re-serializes the
+directory, copies the payload byte for byte into a new file, and leaves stored weights, object
+records and bindings unchanged.
+
+The official `qwen3_8_27b` artifact stores its Text-layer projections at Q4/Q5 under `A16Only`,
+which is the one condition of the [Ada FP8 prefill route](maintainer/ada-fp8-prefill.md) that no
+startup flag can satisfy:
+
+```bash
+python3 tools/set_activation_policy.py \
+  models/qwen3_8_27b.ninfer \
+  models/qwen3_8_27b.a8.ninfer \
+  --policy AllowA8 \
+  --text-projections
+```
+
+`--text-projections` is the shorthand for `--select 'text/layers/*' --formats
+q4_g64_fp16,q5_g64_fp16`, the set `qwen3_8_27b_24gb` permits at conversion time. Select another set
+with repeated `--select PATTERN`, with `--formats LIST`, or with both; every selected record must
+belong to a parameter stored in an integer groupwise format. The tool prints how many records it
+changed and which policies they carried.
+
+The output must be a new path and keeps the source's file segmentation. Lowering a permission
+requires `--force`, because a stored NVFP4 weight needs its `AllowA4` record to run its private
+activation route. The conversion report next to the source describes the original conversion and is
+not copied, and published SHA-256 checksums apply to the downloaded file only.
 
 ## Fused parents and logical projections
 

@@ -139,6 +139,15 @@ Every condition must hold, and the last one defaults to off:
 6. `ops::set_prefill_a8_routes_enabled(true)`, which `EngineOptions::prefill_a8` sets from
    `--prefill-a8 fp8`.
 
+Condition 2 is a property of the artifact rather than a startup choice: `LinearPolicy` comes from
+the Use record of the projection's mathematical input, so Q4/Q5 Text projections stored under
+`A16Only` cannot admit the route however the engine is started, and `--prefill-a8 fp8` has no
+effect on them. The official `qwen3_8_27b` conversion leaves them at that default.
+`tools/convert/recipes/qwen3_8_27b_24gb.py` sets `AllowA8` on exactly the Q4/Q5 Text-layer
+projections it re-assigns, and `tools/set_activation_policy.py` sets the same permission on an
+artifact that already exists, copying its weights unchanged
+([weight conversion](../weight-conversion.md#permit-8-bit-activations-on-an-existing-artifact)).
+
 Registered geometries: Q4 `4096x5120`, `5120x6144`, `6144x5120`, `7168x5120`, `34816x5120`; Q5
 `6144x5120`, `7168x5120`, `5120x6144`, `5120x17408`. K is restricted to the three extents for which
 the shared activation quantizer compiles an instance (5120, 6144, 17408).
