@@ -337,6 +337,37 @@ void test_queue_bounds() {
     require(stats.spills_dropped >= 4, "the queue grew past its bound");
 }
 
+// The store directory and cap Engine policy implies from the options.
+void test_config_resolution() {
+    ninfer::EngineOptions options;
+    options.artifact_path        = "/models/qwen3_6_27b.ninfer";
+    options.prompt_cache.enabled = true;
+    const auto defaulted = resolve_prompt_cache_config(options, "qwen3_6_27b/rk4v4-e8/ctx262144");
+    require(defaulted.directory ==
+                std::filesystem::path("/models") / ".ninfer-cache" /
+                    "qwen3_6_27b-rk4v4-e8-ctx262144",
+            "the default store directory is not beside the artifact");
+    require(defaulted.signature == "qwen3_6_27b/rk4v4-e8/ctx262144",
+            "the signature was rewritten rather than only its path component");
+    require(defaulted.max_bytes == ninfer::kDefaultPromptCacheMaxBytes,
+            "the default cap is not 30 GiB");
+
+    options.prompt_cache.directory = "/var/cache/ninfer";
+    options.prompt_cache.max_bytes = 4ULL << 30;
+    const auto explicitly = resolve_prompt_cache_config(options, "sig");
+    require(explicitly.directory == std::filesystem::path("/var/cache/ninfer"),
+            "an explicit --prompt-cache-dir was not honoured");
+    require(explicitly.max_bytes == (4ULL << 30), "an explicit cap was not honoured");
+
+    bool rejected = false;
+    try {
+        (void)resolve_prompt_cache_config(options, "");
+    } catch (const std::exception&) {
+        rejected = true;
+    }
+    require(rejected, "an empty configuration signature was accepted");
+}
+
 } // namespace
 
 int main() {
@@ -346,6 +377,7 @@ int main() {
         test_missing_slot_and_refused_restore();
         test_request_priority_drops_only_unstarted_spills();
         test_queue_bounds();
+        test_config_resolution();
         std::cout << "ok\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

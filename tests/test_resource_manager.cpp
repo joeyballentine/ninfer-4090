@@ -105,9 +105,13 @@ struct FakeCacheSessionKey {
     friend bool operator==(FakeCacheSessionKey, FakeCacheSessionKey) = default;
 };
 
+// Mirrors the model's PrefixShortlistKey shape, which the persistent disk tier converts field
+// by field into its record key.
 struct FakeShortlistKey {
-    std::uint32_t digest   = 0;
-    std::uint32_t frontier = 0;
+    std::array<std::uint64_t, 2> digests{};
+    std::uint32_t digest       = 0;
+    std::uint32_t frontier     = 0;
+    std::uint32_t identity_tag = 0;
 
     friend bool operator==(FakeShortlistKey, FakeShortlistKey) = default;
 };

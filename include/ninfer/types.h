@@ -1031,6 +1031,7 @@ struct RuntimeStats {
     std::uint64_t prompt_cache_restores       = 0;
     std::uint64_t prompt_cache_restore_failures = 0;
     std::uint64_t prompt_cache_restored_bytes = 0;
+    std::uint64_t prompt_cache_spill_requests = 0;
     std::uint64_t prompt_cache_spills         = 0;
     std::uint64_t prompt_cache_spills_dropped = 0;
     std::uint64_t prompt_cache_spilled_bytes  = 0;

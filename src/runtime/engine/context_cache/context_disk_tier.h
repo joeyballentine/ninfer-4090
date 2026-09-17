@@ -12,6 +12,7 @@
 // whole record at once is what made the donor fork fail on a 24 GB card (c15e0e9e), so the tier
 // asks the port for `batch_pages()` pages at a time and never holds more.
 
+#include "ninfer/types.h"
 #include "runtime/engine/context_cache/context_disk_store.h"
 
 #include <condition_variable>
@@ -20,9 +21,17 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <thread>
 
 namespace ninfer::runtime {
+
+// Resolves the store configuration Engine policy implies. `identity` must cover everything that
+// changes what a stored record means - the artifact, the KV storage and the resolved KV/context
+// geometry - because the store refuses to match records written under a different one.
+// An empty `options.prompt_cache.directory` selects `<artifact dir>/.ninfer-cache/<signature>`.
+[[nodiscard]] ContextDiskStoreConfig resolve_prompt_cache_config(const EngineOptions& options,
+                                                                 std::string_view identity);
 
 struct DiskCheckpointGeometry {
     std::uint32_t page_bytes  = 0;

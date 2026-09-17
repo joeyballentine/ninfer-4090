@@ -2,9 +2,47 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace ninfer::runtime {
+namespace {
+
+// A signature becomes a directory name, so it is reduced to characters every filesystem accepts.
+[[nodiscard]] std::string signature_path_component(std::string_view identity) {
+    std::string name;
+    name.reserve(identity.size());
+    for (const char character : identity) {
+        const bool plain = (character >= '0' && character <= '9') ||
+                           (character >= 'a' && character <= 'z') ||
+                           (character >= 'A' && character <= 'Z') || character == '-' ||
+                           character == '.' || character == '_';
+        name.push_back(plain ? character : '-');
+    }
+    if (name.size() > 96) { name.resize(96); }
+    return name;
+}
+
+} // namespace
+
+ContextDiskStoreConfig resolve_prompt_cache_config(const EngineOptions& options,
+                                                   std::string_view identity) {
+    if (identity.empty()) {
+        throw std::invalid_argument("the prompt cache configuration signature is empty");
+    }
+    ContextDiskStoreConfig config;
+    config.signature = std::string(identity);
+    config.directory = options.prompt_cache.directory;
+    if (config.directory.empty()) {
+        std::filesystem::path base = options.artifact_path;
+        base                       = base.has_parent_path() ? base.parent_path() : ".";
+        config.directory = base / ".ninfer-cache" / signature_path_component(identity);
+    }
+    config.max_bytes = options.prompt_cache.max_bytes != 0 ? options.prompt_cache.max_bytes
+                                                           : kDefaultPromptCacheMaxBytes;
+    return config;
+}
+
 
 ContextDiskTier::ContextDiskTier(ContextDiskStoreConfig config, ContextDiskTransferPort& port,
                                  std::uint32_t queue_depth)
