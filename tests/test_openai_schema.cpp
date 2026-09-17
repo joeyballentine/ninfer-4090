@@ -254,8 +254,19 @@ int test_response_format() {
     failures += check(api_error([&] { (void)parse(with_tools); }).code == "response_format_conflict",
                       "a structured response format and tools are exclusive");
 
-    failures += check(!options(object_request).execution.thinking.budget.has_value(),
-                      "a structured request carries no thinking budget into Engine options");
+    // The response is its grammar's language from the first token, so the server's default
+    // thinking budget must not open a reasoning phase in front of it.
+    ServeOptions budgeted;
+    budgeted.default_thinking_budget = 32;
+    const GenerationRequest plain    = parse(base_request()).generation;
+    failures +=
+        check(to_request_options(plain, budgeted, resolve_prompt_semantics(plain, budgeted), true)
+                  .execution.thinking.budget.value_or(0) == 32,
+              "the server default thinking budget reaches an ordinary request");
+    failures += check(!to_request_options(object_request, budgeted,
+                                          resolve_prompt_semantics(object_request, budgeted), true)
+                           .execution.thinking.budget.has_value(),
+                      "the server default thinking budget skips a structured request");
 #else
     failures += check(api_error([&] { (void)parse(object_body); }).code ==
                           "response_format_not_supported",
