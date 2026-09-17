@@ -283,8 +283,13 @@ D256 Main/MTP profile 的单 token/head 物理 payload 为：
 | RK4V4 / RK4V4-E8 (sm_89) | 128 B + 8 B | 128 B + 8 B | 272 B |
 | RK2V4-E8 (sm_89) | 64 B + 8 B | 128 B + 8 B | 208 B |
 
-sm_89 的 rotated family（`rk8v4` / `rk4v4` / `rk4v4-e8` / `rk2v4-e8`）在编码前对每个 64-dim group 施加 H64
-rotation；scale plane 与 INT8-G64 相同（FP16，\(X=D/64\)），code plane 为 int8（`rk8v4` 的 K）或
+INT8-G64 与 FP8-E4M3FN-row256 的 K code plane 存储 \(R\,K\)，其中 \(R\) 是固定的 normalized D256
+Hadamard；NVFP4-G16 与 K8V4 另外存储 \(R\,V\)。该 codec 不随执行目标变化：sm_89 与 sm_120a 写入同一
+表示，consumer 对 Q 施加同一个 \(R\)。sm_89 的 INT8 kernel 把 H256 分解为四个 per-group H64 片段加一次
+跨 group 的 H4 蝶形，butterfly 与 rounding order 与整行实现相同，因此两个 build 的 stored bytes 一致。
+
+sm_89 的 rotated family（`rk8v4` / `rk4v4` / `rk4v4-e8` / `rk2v4-e8`）是独立的 closed profile，与上述 D256
+rotation 无关：它在编码前只对每个 64-dim group 施加 H64 rotation；scale plane 与 INT8-G64 相同（FP16，\(X=D/64\)），code plane 为 int8（`rk8v4` 的 K）或
 packed U8 \(X=D/2\)（int4，两码一字节）。`rk2v4-e8` 的 K code plane 为 U8 \(X=D/4\)：每 8 维存
 一对字节（8-bit E8 根索引 + 4-bit log 半径 + 4-bit 残差超八面体轴）。donor（4090 fork）的 release
 notes 以每 token/head 的半数记账，把这几行分别写作 196 B、132/136 B 和 100 B；本表给出的是实际

@@ -52,13 +52,12 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
         return;
     }
 #if defined(NINFER_SM89)
-    // Llenado i8 del fork sergiuszm/ninfer-4090: rk8v4 / rk4v4 / rk4v4-e8 / rk2v4-e8 / int8.
-    // (El dispatch de flags del donante se mapea sobre el enum KvCacheStorage.)
+    // sm_89 rotated KV family: rk8v4 / rk4v4 / rk4v4-e8 / rk2v4-e8. Int8Group64 is deliberately
+    // absent; it keeps the D256-rotated key contract and shares the common INT8 kernels below.
     if (cache.storage == KvCacheStorage::RK4V4E8 ||
         cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
         cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
-        cache.storage == KvCacheStorage::RK2V4E8 ||
-        cache.storage == KvCacheStorage::Int8Group64) {
+        cache.storage == KvCacheStorage::RK2V4E8) {
         Tensor& cache_k_scale = cache.k_scale_pages;
         Tensor& cache_v_scale = cache.v_scale_pages;
         const auto launch_fill = [&]<bool PackedV, bool RotateK, bool RotateV, bool PackedK,
@@ -70,8 +69,8 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
                 const dim3 fill_grid(static_cast<unsigned>(max_tiles),
                                      static_cast<unsigned>(Geometry::KVHeads),
                                      static_cast<unsigned>(kKVCacheInt8Groups));
-                kv_cache_append_full_i8_page_kernel<Geometry, PackedV, RotateK, RotateV,
-                                                    PackedK, E8Lattice, E8Root, Metadata>
+                kv_cache_append_full_rotated_i8_page_kernel<Geometry, PackedV, RotateK, RotateV,
+                                                            PackedK, E8Lattice, E8Root, Metadata>
                     <<<fill_grid, kBlock, 0, stream>>>(
                         static_cast<const __nv_bfloat16*>(k.data),
                         static_cast<const __nv_bfloat16*>(v.data),
@@ -86,8 +85,8 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
                     static_cast<std::int64_t>(tokens) * Geometry::KVHeads * kKVCacheInt8Groups;
                 const int fill_grid =
                     static_cast<int>(div_up(fill_units, static_cast<std::int64_t>(FillWarps)));
-                kv_cache_append_full_i8_kernel<Geometry, PackedV, RotateK, RotateV, PackedK,
-                                               E8Lattice, E8Root, Metadata>
+                kv_cache_append_full_rotated_i8_kernel<Geometry, PackedV, RotateK, RotateV, PackedK,
+                                                       E8Lattice, E8Root, Metadata>
                     <<<fill_grid, kBlock, 0, stream>>>(
                         static_cast<const __nv_bfloat16*>(k.data),
                         static_cast<const __nv_bfloat16*>(v.data),
@@ -103,18 +102,16 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
         } else if (cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64) {
             launch_fill.template operator()<true, true, true, true, false, false>();
         } else if (cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {
-            // rk8v4: K int8 rotada (PackedK=false), V int4 rotada (PackedV=true).
+            // rk8v4: int8 rotated K (PackedK=false), int4 rotated V (PackedV=true).
             launch_fill.template operator()<true, true, true, false, false, false>();
-        } else if (cache.storage == KvCacheStorage::RK2V4E8) {
-            // rk2v4-e8: K factorizada en el cilindro E8 (E8Root), V int4 rotada.
-            launch_fill.template operator()<true, true, true, false, false, true>();
         } else {
-            launch_fill.template operator()<false, false, false, false, false, false>();
+            // rk2v4-e8: K factored on the E8 cylinder (E8Root), int4 rotated V.
+            launch_fill.template operator()<true, true, true, false, false, true>();
         }
         CUDA_CHECK(cudaGetLastError());
         return;
     }
-#else
+#endif
     if (cache.storage == KvCacheStorage::Int8Group64) {
         Tensor& cache_k_scale = cache.k_scale_pages;
         Tensor& cache_v_scale = cache.v_scale_pages;
@@ -148,7 +145,6 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
         CUDA_CHECK(cudaGetLastError());
         return;
     }
-#endif
 
     constexpr int Block         = Geometry::KVHeads == 4 ? 128 : 96;
     constexpr int VecElems      = 8;

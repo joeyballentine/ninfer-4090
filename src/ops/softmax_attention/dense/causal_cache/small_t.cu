@@ -46,7 +46,7 @@ std::int32_t causal_small_t_split_upper_bound(std::int32_t window) {
 template <typename Geometry>
 std::int32_t causal_small_t_split_count(std::int32_t window, std::int32_t tokens,
                                         KvCacheStorage storage) {
-    // La familia int8 (incluida la packed int4/E8 del build sm_89) comparte el perfil de splits.
+    // The int8 family (including the sm_89 packed int4 / E8 modes) shares the split profile.
     const bool int8_family = storage == KvCacheStorage::Int8Group64 ||
                              storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
                              storage == KvCacheStorage::RK4V4E8 ||
@@ -130,9 +130,11 @@ void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos
 }
 
 #if defined(NINFER_SM89)
-// Launcher del kernel i8 del fork sergiuszm/ninfer-4090 (modos packed int4 / E8).
+// sm_89 INT8-family launcher. RotateK/RotateV select the rotated family's per-group H64 codecs;
+// RotateK256 selects the D256-rotated Int8Group64 contract shared with the 120a build.
 template <typename Geometry, int TokenTile, bool PackedV, bool RotateK, bool RotateV,
-          bool PackedK, bool E8Lattice, bool E8Root, bool MultiBatch, bool Masked, typename CacheInput>
+          bool PackedK, bool E8Lattice, bool E8Root, bool RotateK256, bool MultiBatch, bool Masked,
+          typename CacheInput>
 void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, float scale,
                           PagedKVBatchLayerView cache, const CausalSmallTInvocation& invocation,
                           std::int32_t logical_capacity, std::int32_t implementation_window,
@@ -152,15 +154,15 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                 causal_attention_small_t_i8_tiled_kernel<Geometry, TokenTile, WarpsPerCta,
                                                          MinBlocksPerSm, KeyBlock, DynamicArena,
                                                          PackedV, RotateK, RotateV, PackedK,
-                                                         E8Lattice, E8Root, MultiBatch, Masked,
-                                                         CacheInput>,
+                                                         E8Lattice, E8Root, RotateK256, MultiBatch,
+                                                         Masked, CacheInput>,
                 cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kDynamicBytes));
             CUDA_CHECK(attr);
         }
         causal_attention_small_t_i8_tiled_kernel<Geometry, TokenTile, WarpsPerCta, MinBlocksPerSm,
                                                  KeyBlock, DynamicArena, PackedV, RotateK, RotateV,
-                                                 PackedK, E8Lattice, E8Root, MultiBatch, Masked,
-                                                 CacheInput>
+                                                 PackedK, E8Lattice, E8Root, RotateK256,
+                                                 MultiBatch, Masked, CacheInput>
             <<<grid, WarpsPerCta * 32, kDynamicBytes, stream>>>(
                 static_cast<const __nv_bfloat16*>(q.data), input,
                 static_cast<const std::int32_t*>(pos.data), static_cast<std::int8_t*>(cache_k.data),
@@ -372,35 +374,36 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
     // BF16 keeps its row-tile warp count; INT8 selects its producer/consumer
     // geometry inside launch_tc_partial_i8.
 #if defined(NINFER_SM89)
-// Macro de dispatch del build sm_89: la rama i8 cubre rk4v4 / rk4v4-e8 / int8.
+// sm_89 dispatch: the i8 branch covers the rotated family and the D256-rotated Int8Group64.
 #define NINFER_CAUSAL_SMALL_T_DISPATCH(TOKENS, WARPS)                                              \
     do {                                                                                           \
         const auto launch_profile = [&]<bool MultiBatch, bool Masked>() {                          \
             if (cache.storage == KvCacheStorage::RK4V4E8) {                                        \
                 launch_tc_partial_i8<Geometry, (TOKENS), true, true, true, true, true, false,      \
-                                    MultiBatch, Masked>(                                           \
+                                    false, MultiBatch, Masked>(                                    \
                     q, input, pos, scale, cache, invocation, logical_capacity,                     \
                     implementation_window, splits, partial_acc, partial_m, partial_l, stream);     \
             } else if (cache.storage ==                                                            \
                        KvCacheStorage::RotatedInt4KeyInt4ValueGroup64) {                           \
                 launch_tc_partial_i8<Geometry, (TOKENS), true, true, true, true, false, false,     \
-                                    MultiBatch, Masked>(                                           \
+                                    false, MultiBatch, Masked>(                                    \
                     q, input, pos, scale, cache, invocation, logical_capacity,                     \
                     implementation_window, splits, partial_acc, partial_m, partial_l, stream);     \
             } else if (cache.storage ==                                                            \
                        KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {                           \
                 launch_tc_partial_i8<Geometry, (TOKENS), true, true, true, false, false, false,    \
-                                    MultiBatch, Masked>(                                           \
+                                    false, MultiBatch, Masked>(                                    \
                     q, input, pos, scale, cache, invocation, logical_capacity,                     \
                     implementation_window, splits, partial_acc, partial_m, partial_l, stream);     \
             } else if (cache.storage == KvCacheStorage::RK2V4E8) {                                 \
-                launch_tc_partial_i8<Geometry, (TOKENS), true, true, true, false, false, true,      \
-                                    MultiBatch, Masked>(                                           \
+                launch_tc_partial_i8<Geometry, (TOKENS), true, true, true, false, false, true,     \
+                                    false, MultiBatch, Masked>(                                    \
                     q, input, pos, scale, cache, invocation, logical_capacity,                     \
                     implementation_window, splits, partial_acc, partial_m, partial_l, stream);     \
             } else if (cache.storage == KvCacheStorage::Int8Group64) {                             \
+                /* D256-rotated keys and Q; identical stored codec to the 120a INT8 route. */      \
                 launch_tc_partial_i8<Geometry, (TOKENS), false, false, false, false, false, false, \
-                                    MultiBatch, Masked>(                                           \
+                                    true, MultiBatch, Masked>(                                     \
                     q, input, pos, scale, cache, invocation, logical_capacity,                     \
                     implementation_window, splits, partial_acc, partial_m, partial_l, stream);     \
             } else {                                                                               \
@@ -563,8 +566,8 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
     else
         launch_for_storage.template operator()<false>();
     CUDA_CHECK(cudaGetLastError());
-    // Los modos con V rotada (rk8v4 / rk4v4 / rk4v4-e8, solo sm_89) devuelven el PV al espacio
-    // original con la inversa de la rotacion H64 (self-inverse).
+    // The sm_89 modes with a rotated V (rk8v4 / rk4v4 / rk4v4-e8 / rk2v4-e8) bring PV back to the
+    // original basis with the inverse H64 rotation (self-inverse). Int8Group64 leaves V unrotated.
     if (cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
         cache.storage == KvCacheStorage::RK4V4E8 ||
         cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||

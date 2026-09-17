@@ -64,7 +64,8 @@ __device__ __forceinline__ void causal_small_t_i8_store_swz(std::int8_t* tile, i
 // next K/V tile is prefetched into the same arena while the current PV runs.
 template <typename Geometry, int TokenTile, int WarpsPerCta, int MinBlocksPerSm, int KeyBlock,
           bool DynamicArena, bool PackedV, bool RotateK, bool RotateV, bool PackedK,
-          bool E8Lattice = false, bool E8Root = false, bool MultiBatch = false, bool Masked = false, typename CacheInput = void*>
+          bool E8Lattice = false, bool E8Root = false, bool RotateK256 = false,
+          bool MultiBatch = false, bool Masked = false, typename CacheInput = void*>
 __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     void causal_attention_small_t_i8_tiled_kernel(
         const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, std::int8_t* cache_k_i8,
@@ -99,6 +100,10 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     static_assert(Wc % RowTiles == 0);
     static_assert(PVNtPerWarp == 2 || PVNtPerWarp == 4 || PVNtPerWarp == 8 || PVNtPerWarp == 16);
     static_assert(QKKs == Groups * GroupKc);
+    // Int8Group64 honours the D256 key-rotation contract; the sm_89 rotated family owns the
+    // per-group H64 codecs. The two preparations are mutually exclusive.
+    static_assert(!RotateK256 ||
+                  (!PackedV && !RotateK && !RotateV && !PackedK && !E8Lattice && !E8Root));
 
     // Keep Q in a compact dedicated tile so the producer can reload one
     // 64-dimension group at a time instead of carrying all eight fragments in
@@ -208,160 +213,289 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     const int key_blocks = div_up(split_end - first_tile, Bc);
 
     if constexpr (CacheInput::writes_cache) {
-        // The owning split quantizes each current row before its cache tile is consumed.
-        for (int pair = warp; pair < valid_tokens * Groups; pair += Wc) {
-            const int token    = pair / Groups;
-            const int grp      = pair - token * Groups;
-            const int position = pos[token];
-            if (position < split_start || position >= split_end) { continue; }
-            int physical_page       = lane == 0 ? paged_kv_physical_page(block_table, position) : 0;
-            const int page_offset   = position & kPagedKVPageMask;
-            const int d0            = grp * kKVCacheInt8Group + lane;
-            const int d1            = d0 + 32;
-            const std::int64_t src0 = kv_cache_int8_new_index<Geometry>(kv_head, d0, token);
-            const std::int64_t src1 = kv_cache_int8_new_index<Geometry>(kv_head, d1, token);
-            float kv0               = __bfloat162float(input.k[src0]);
-            float kv1               = __bfloat162float(input.k[src1]);
-            float vv0               = __bfloat162float(input.v[src0]);
-            float vv1               = __bfloat162float(input.v[src1]);
-            if constexpr (RotateK) { kv_cache_hadamard64(kv0, kv1, FullMask); }
-            if constexpr (RotateV) { kv_cache_hadamard64(vv0, vv1, FullMask); }
-            float kamax             = fmaxf(fabsf(kv0), fabsf(kv1));
-            float vamax             = fmaxf(fabsf(vv0), fabsf(vv1));
-            kamax                   = warp_max(kamax, FullMask);
-            vamax                   = warp_max(vamax, FullMask);
-            const __half ksh = __float2half_rn(kamax > 0.0f ? kamax / ((PackedK || E8Root) ? 7.0f : 127.0f) : 0.0f);
-            const __half vsh = __float2half_rn(vamax > 0.0f ? vamax / (PackedV ? 7.0f : 127.0f)
-                                                                : 0.0f);
-            const float ks          = __half2float(ksh);
-            const float vs          = __half2float(vsh);
-            const float k_inv       = ks > 0.0f ? 1.0f / ks : 0.0f;
-            const float v_inv       = vs > 0.0f ? 1.0f / vs : 0.0f;
-            physical_page           = __shfl_sync(FullMask, physical_page, 0);
-            if constexpr (E8Root) {
-                uint8_t c1_0, c2_0, c1_1, c2_1;
-                e8_encode_cylinder_8d_warp(kv0, ks, c1_0, c2_0, lane);
-                e8_encode_cylinder_8d_warp(kv1, ks, c1_1, c2_1, lane);
-                if ((lane & 7) == 0) {
-                    int s0 = (lane / 8);
-                    int s1 = 4 + (lane / 8);
-                    const std::int64_t k_base = paged_kv_page_head_offset<64, Geometry::KVHeads>(physical_page, kv_head) +
-                                                static_cast<std::int64_t>(page_offset) * 64 + grp * 16;
-                    reinterpret_cast<std::uint8_t*>(cache_k_i8)[k_base + s0 * 2 + 0] = c1_0;
-                    reinterpret_cast<std::uint8_t*>(cache_k_i8)[k_base + s0 * 2 + 1] = c2_0;
-                    reinterpret_cast<std::uint8_t*>(cache_k_i8)[k_base + s1 * 2 + 0] = c1_1;
-                    reinterpret_cast<std::uint8_t*>(cache_k_i8)[k_base + s1 * 2 + 1] = c2_1;
+        if constexpr (RotateK256) {
+            // INT8-G64 stores R*K with R the fixed normalized D256 Hadamard. Decompose H256 as an
+            // H4 over four independently transformed H64 groups: the existing (token, group) warp
+            // schedule computes every H64 fragment in parallel and the FP32 main arena carries the
+            // final H4 stage. This keeps the complete transform's butterfly and rounding order, so
+            // the fused write is byte-identical to the standalone append kernel. V stays in the
+            // original coordinates with the unrotated G64 codec.
+            float* k_h64_s = reinterpret_cast<float*>(r_s);
+            for (int pair = warp; pair < valid_tokens * Groups; pair += Wc) {
+                const int token    = pair / Groups;
+                const int grp      = pair - token * Groups;
+                const int position = pos[token];
+                if (position < split_start || position >= split_end) { continue; }
+                const int d0            = grp * kKVCacheInt8Group + lane;
+                const int d1            = d0 + 32;
+                const std::int64_t src0 = kv_cache_int8_new_index<Geometry>(kv_head, d0, token);
+                const std::int64_t src1 = kv_cache_int8_new_index<Geometry>(kv_head, d1, token);
+                float k_h64[2] = {__bfloat162float(input.k[src0]), __bfloat162float(input.k[src1])};
+                hadamard_d64_fragment_inplace(k_h64, lane);
+                k_h64_s[token * D + d0] = k_h64[0];
+                k_h64_s[token * D + d1] = k_h64[1];
+            }
+            __syncthreads();
+
+            auto* cache_v_i8 = reinterpret_cast<std::int8_t*>(cache_v_codes);
+            for (int pair = warp; pair < valid_tokens * Groups; pair += Wc) {
+                const int token    = pair / Groups;
+                const int grp      = pair - token * Groups;
+                const int position = pos[token];
+                if (position < split_start || position >= split_end) { continue; }
+                int physical_page = lane == 0 ? paged_kv_physical_page(block_table, position) : 0;
+                physical_page     = __shfl_sync(FullMask, physical_page, 0);
+                const int page_offset   = position & kPagedKVPageMask;
+                const int d0            = grp * kKVCacheInt8Group + lane;
+                const int d1            = d0 + 32;
+                const std::int64_t src0 = kv_cache_int8_new_index<Geometry>(kv_head, d0, token);
+                const std::int64_t src1 = kv_cache_int8_new_index<Geometry>(kv_head, d1, token);
+
+                float k_out[2];
+#pragma unroll
+                for (int half = 0; half < 2; ++half) {
+                    const int dh   = lane + half * 32;
+                    const float x0 = k_h64_s[token * D + dh];
+                    const float x1 = k_h64_s[token * D + kKVCacheInt8Group + dh];
+                    const float x2 = k_h64_s[token * D + 2 * kKVCacheInt8Group + dh];
+                    const float x3 = k_h64_s[token * D + 3 * kKVCacheInt8Group + dh];
+                    k_out[half] =
+                        normalized_hadamard_d256_group_value_from_h64(x0, x1, x2, x3, grp);
                 }
-                const float vv0_hi = __shfl_down_sync(FullMask, vv0, 1);
-                const float vv1_hi = __shfl_down_sync(FullMask, vv1, 1);
-                if ((lane & 1) == 0) {
-                    cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d0 / 2, page_offset)] =
-                        kv_cache_pack_i4(kv_cache_i4_quant_code(vv0, v_inv), kv_cache_i4_quant_code(vv0_hi, v_inv));
-                    cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d1 / 2, page_offset)] =
-                        kv_cache_pack_i4(kv_cache_i4_quant_code(vv1, v_inv), kv_cache_i4_quant_code(vv1_hi, v_inv));
+
+                const float kv0    = k_out[0];
+                const float kv1    = k_out[1];
+                const float vv0    = __bfloat162float(input.v[src0]);
+                const float vv1    = __bfloat162float(input.v[src1]);
+                const float kamax  = warp_max(fmaxf(fabsf(kv0), fabsf(kv1)), FullMask);
+                const float vamax  = warp_max(fmaxf(fabsf(vv0), fabsf(vv1)), FullMask);
+                const auto k_quant = kv_cache_int8_quant_params(kamax);
+                const auto v_quant = kv_cache_int8_quant_params(vamax);
+                cache_k_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d0,
+                                                                    page_offset)] =
+                    kv_cache_int8_quant_code(kv0, k_quant.inverse_scale);
+                cache_k_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d1,
+                                                                    page_offset)] =
+                    kv_cache_int8_quant_code(kv1, k_quant.inverse_scale);
+                cache_v_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d0,
+                                                                    page_offset)] =
+                    kv_cache_int8_quant_code(vv0, v_quant.inverse_scale);
+                cache_v_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d1,
+                                                                    page_offset)] =
+                    kv_cache_int8_quant_code(vv1, v_quant.inverse_scale);
+                if (lane == 0) {
+                    const std::int64_t so = kv_cache_int8_quant_scale_index<Geometry>(
+                        physical_page, kv_head, grp, page_offset);
+                    cache_k_scale[so] = k_quant.scale;
+                    cache_v_scale[so] = v_quant.scale;
                 }
-            } else if constexpr (PackedK) {
-                std::int8_t c0 = 0, c1 = 0;
-                if constexpr (E8Lattice) {
-                    float kv0_scaled = kv0 * k_inv;
-                    float kv1_scaled = kv1 * k_inv;
-                    e8_project_8d_warp(kv0_scaled, kv1_scaled, lane);
-                    // NOTE (correctness hardening of the ported codec): e8_project_8d_warp
-                    // returns the nearest E8 lattice point, which may lie in the D8+0.5
-                    // coset (all coordinates half-integral). The i4/int8 codes can only hold
-                    // integers and no coset bit is stored, so the half is intentionally
-                    // collapsed here by the rintf()+cast below and the D8+0.5 coset is NOT
-                    // reconstructed on decode (reconstructed K == code * ks). This is a
-                    // deliberate half-coset approximation of rk4v4-e8, not an exact E8
-                    // lattice projection, for any vector whose nearest lattice point is
-                    // half-integral. Preserving the exact E8 point would require a per-8-dim
-                    // coset bit in the packed layout (a format change, out of scope here).
-                    // The rk4v4 (non-E8) path below is unaffected. Original design credit:
-                    // UDPSendToFailed/ninfer-4090 (and Don-Chad/ninfer-3090 lineage).
-                    int q0 = static_cast<int>(rintf(kv0_scaled));
-                    int q1 = static_cast<int>(rintf(kv1_scaled));
-                    c0 = static_cast<std::int8_t>(max(-8, min(7, q0)));
-                    c1 = static_cast<std::int8_t>(max(-8, min(7, q1)));
-                } else {
-                    c0 = kv_cache_i4_quant_code(kv0, k_inv);
-                    c1 = kv_cache_i4_quant_code(kv1, k_inv);
-                }
-                const std::int8_t c0_hi = static_cast<std::int8_t>(__shfl_down_sync(FullMask, static_cast<int>(c0), 1));
-                const std::int8_t c1_hi = static_cast<std::int8_t>(__shfl_down_sync(FullMask, static_cast<int>(c1), 1));
-                const float vv0_hi = __shfl_down_sync(FullMask, vv0, 1);
-                const float vv1_hi = __shfl_down_sync(FullMask, vv1, 1);
-                if ((lane & 1) == 0) {
-                    reinterpret_cast<std::uint8_t*>(cache_k_i8)[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d0 / 2, page_offset)] =
-                        kv_cache_pack_i4(c0, c0_hi);
-                    reinterpret_cast<std::uint8_t*>(cache_k_i8)[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d1 / 2, page_offset)] =
-                        kv_cache_pack_i4(c1, c1_hi);
-                    cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d0 / 2, page_offset)] =
-                        kv_cache_pack_i4(kv_cache_i4_quant_code(vv0, v_inv), kv_cache_i4_quant_code(vv0_hi, v_inv));
-                    cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d1 / 2, page_offset)] =
-                        kv_cache_pack_i4(kv_cache_i4_quant_code(vv1, v_inv), kv_cache_i4_quant_code(vv1_hi, v_inv));
-                }
-            } else {
-                cache_k_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d0, page_offset)] =
-                    kv_cache_int8_quant_code(kv0, k_inv);
-                cache_k_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d1, page_offset)] =
-                    kv_cache_int8_quant_code(kv1, k_inv);
-                if constexpr (PackedV) {
+            }
+            __syncthreads();
+        } else {
+            // The owning split quantizes each current row before its cache tile is consumed.
+            for (int pair = warp; pair < valid_tokens * Groups; pair += Wc) {
+                const int token    = pair / Groups;
+                const int grp      = pair - token * Groups;
+                const int position = pos[token];
+                if (position < split_start || position >= split_end) { continue; }
+                int physical_page = lane == 0 ? paged_kv_physical_page(block_table, position) : 0;
+                const int page_offset   = position & kPagedKVPageMask;
+                const int d0            = grp * kKVCacheInt8Group + lane;
+                const int d1            = d0 + 32;
+                const std::int64_t src0 = kv_cache_int8_new_index<Geometry>(kv_head, d0, token);
+                const std::int64_t src1 = kv_cache_int8_new_index<Geometry>(kv_head, d1, token);
+                float kv0               = __bfloat162float(input.k[src0]);
+                float kv1               = __bfloat162float(input.k[src1]);
+                float vv0               = __bfloat162float(input.v[src0]);
+                float vv1               = __bfloat162float(input.v[src1]);
+                if constexpr (RotateK) { kv_cache_hadamard64(kv0, kv1, FullMask); }
+                if constexpr (RotateV) { kv_cache_hadamard64(vv0, vv1, FullMask); }
+                float kamax      = fmaxf(fabsf(kv0), fabsf(kv1));
+                float vamax      = fmaxf(fabsf(vv0), fabsf(vv1));
+                kamax            = warp_max(kamax, FullMask);
+                vamax            = warp_max(vamax, FullMask);
+                const __half ksh = __float2half_rn(
+                    kamax > 0.0f ? kamax / ((PackedK || E8Root) ? 7.0f : 127.0f) : 0.0f);
+                const __half vsh =
+                    __float2half_rn(vamax > 0.0f ? vamax / (PackedV ? 7.0f : 127.0f) : 0.0f);
+                const float ks    = __half2float(ksh);
+                const float vs    = __half2float(vsh);
+                const float k_inv = ks > 0.0f ? 1.0f / ks : 0.0f;
+                const float v_inv = vs > 0.0f ? 1.0f / vs : 0.0f;
+                physical_page     = __shfl_sync(FullMask, physical_page, 0);
+                if constexpr (E8Root) {
+                    uint8_t c1_0, c2_0, c1_1, c2_1;
+                    e8_encode_cylinder_8d_warp(kv0, ks, c1_0, c2_0, lane);
+                    e8_encode_cylinder_8d_warp(kv1, ks, c1_1, c2_1, lane);
+                    if ((lane & 7) == 0) {
+                        int s0 = (lane / 8);
+                        int s1 = 4 + (lane / 8);
+                        const std::int64_t k_base =
+                            paged_kv_page_head_offset<64, Geometry::KVHeads>(physical_page,
+                                                                             kv_head) +
+                            static_cast<std::int64_t>(page_offset) * 64 + grp * 16;
+                        reinterpret_cast<std::uint8_t*>(cache_k_i8)[k_base + s0 * 2 + 0] = c1_0;
+                        reinterpret_cast<std::uint8_t*>(cache_k_i8)[k_base + s0 * 2 + 1] = c2_0;
+                        reinterpret_cast<std::uint8_t*>(cache_k_i8)[k_base + s1 * 2 + 0] = c1_1;
+                        reinterpret_cast<std::uint8_t*>(cache_k_i8)[k_base + s1 * 2 + 1] = c2_1;
+                    }
                     const float vv0_hi = __shfl_down_sync(FullMask, vv0, 1);
                     const float vv1_hi = __shfl_down_sync(FullMask, vv1, 1);
                     if ((lane & 1) == 0) {
-                        cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d0 / 2,
-                                                                     page_offset)] =
+                        cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head,
+                                                                       d0 / 2, page_offset)] =
                             kv_cache_pack_i4(kv_cache_i4_quant_code(vv0, v_inv),
-                                           kv_cache_i4_quant_code(vv0_hi, v_inv));
-                        cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d1 / 2,
-                                                                     page_offset)] =
+                                             kv_cache_i4_quant_code(vv0_hi, v_inv));
+                        cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head,
+                                                                       d1 / 2, page_offset)] =
                             kv_cache_pack_i4(kv_cache_i4_quant_code(vv1, v_inv),
-                                           kv_cache_i4_quant_code(vv1_hi, v_inv));
+                                             kv_cache_i4_quant_code(vv1_hi, v_inv));
+                    }
+                } else if constexpr (PackedK) {
+                    std::int8_t c0 = 0, c1 = 0;
+                    if constexpr (E8Lattice) {
+                        float kv0_scaled = kv0 * k_inv;
+                        float kv1_scaled = kv1 * k_inv;
+                        e8_project_8d_warp(kv0_scaled, kv1_scaled, lane);
+                        // NOTE (correctness hardening of the ported codec): e8_project_8d_warp
+                        // returns the nearest E8 lattice point, which may lie in the D8+0.5
+                        // coset (all coordinates half-integral). The i4/int8 codes can only hold
+                        // integers and no coset bit is stored, so the half is intentionally
+                        // collapsed here by the rintf()+cast below and the D8+0.5 coset is NOT
+                        // reconstructed on decode (reconstructed K == code * ks). This is a
+                        // deliberate half-coset approximation of rk4v4-e8, not an exact E8
+                        // lattice projection, for any vector whose nearest lattice point is
+                        // half-integral. Preserving the exact E8 point would require a per-8-dim
+                        // coset bit in the packed layout (a format change, out of scope here).
+                        // The rk4v4 (non-E8) path below is unaffected. Original design credit:
+                        // UDPSendToFailed/ninfer-4090 (and Don-Chad/ninfer-3090 lineage).
+                        int q0 = static_cast<int>(rintf(kv0_scaled));
+                        int q1 = static_cast<int>(rintf(kv1_scaled));
+                        c0     = static_cast<std::int8_t>(max(-8, min(7, q0)));
+                        c1     = static_cast<std::int8_t>(max(-8, min(7, q1)));
+                    } else {
+                        c0 = kv_cache_i4_quant_code(kv0, k_inv);
+                        c1 = kv_cache_i4_quant_code(kv1, k_inv);
+                    }
+                    const std::int8_t c0_hi = static_cast<std::int8_t>(
+                        __shfl_down_sync(FullMask, static_cast<int>(c0), 1));
+                    const std::int8_t c1_hi = static_cast<std::int8_t>(
+                        __shfl_down_sync(FullMask, static_cast<int>(c1), 1));
+                    const float vv0_hi = __shfl_down_sync(FullMask, vv0, 1);
+                    const float vv1_hi = __shfl_down_sync(FullMask, vv1, 1);
+                    if ((lane & 1) == 0) {
+                        reinterpret_cast<std::uint8_t*>(
+                            cache_k_i8)[kv_cache_i4_code_index<Geometry>(physical_page, kv_head,
+                                                                         d0 / 2, page_offset)] =
+                            kv_cache_pack_i4(c0, c0_hi);
+                        reinterpret_cast<std::uint8_t*>(
+                            cache_k_i8)[kv_cache_i4_code_index<Geometry>(physical_page, kv_head,
+                                                                         d1 / 2, page_offset)] =
+                            kv_cache_pack_i4(c1, c1_hi);
+                        cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head,
+                                                                       d0 / 2, page_offset)] =
+                            kv_cache_pack_i4(kv_cache_i4_quant_code(vv0, v_inv),
+                                             kv_cache_i4_quant_code(vv0_hi, v_inv));
+                        cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head,
+                                                                       d1 / 2, page_offset)] =
+                            kv_cache_pack_i4(kv_cache_i4_quant_code(vv1, v_inv),
+                                             kv_cache_i4_quant_code(vv1_hi, v_inv));
                     }
                 } else {
-                    auto* cache_v_i8 = reinterpret_cast<std::int8_t*>(cache_v_codes);
-                    cache_v_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d0,
-                                                                  page_offset)] =
-                        kv_cache_int8_quant_code(vv0, v_inv);
-                    cache_v_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d1,
-                                                                  page_offset)] =
-                        kv_cache_int8_quant_code(vv1, v_inv);
+                    cache_k_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d0,
+                                                                        page_offset)] =
+                        kv_cache_int8_quant_code(kv0, k_inv);
+                    cache_k_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d1,
+                                                                        page_offset)] =
+                        kv_cache_int8_quant_code(kv1, k_inv);
+                    if constexpr (PackedV) {
+                        const float vv0_hi = __shfl_down_sync(FullMask, vv0, 1);
+                        const float vv1_hi = __shfl_down_sync(FullMask, vv1, 1);
+                        if ((lane & 1) == 0) {
+                            cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head,
+                                                                           d0 / 2, page_offset)] =
+                                kv_cache_pack_i4(kv_cache_i4_quant_code(vv0, v_inv),
+                                                 kv_cache_i4_quant_code(vv0_hi, v_inv));
+                            cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head,
+                                                                           d1 / 2, page_offset)] =
+                                kv_cache_pack_i4(kv_cache_i4_quant_code(vv1, v_inv),
+                                                 kv_cache_i4_quant_code(vv1_hi, v_inv));
+                        }
+                    } else {
+                        auto* cache_v_i8 = reinterpret_cast<std::int8_t*>(cache_v_codes);
+                        cache_v_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head,
+                                                                            d0, page_offset)] =
+                            kv_cache_int8_quant_code(vv0, v_inv);
+                        cache_v_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head,
+                                                                            d1, page_offset)] =
+                            kv_cache_int8_quant_code(vv1, v_inv);
+                    }
+                }
+                if (lane == 0) {
+                    const std::int64_t so = kv_cache_int8_quant_scale_index<Geometry>(
+                        physical_page, kv_head, grp, page_offset);
+                    cache_k_scale[so] = ksh;
+                    cache_v_scale[so] = vsh;
                 }
             }
-            if (lane == 0) {
-                const std::int64_t so =
-                    kv_cache_int8_quant_scale_index<Geometry>(physical_page, kv_head, grp, page_offset);
-                cache_k_scale[so] = ksh;
-                cache_v_scale[so] = vsh;
-            }
+            __syncthreads();
         }
-        __syncthreads();
     }
 
     for (int i = tid; i < Br * D; i += Threads) { q_i8[i] = 0; }
     for (int i = tid; i < RowCount * Groups; i += Threads) { q_scale_tmp[i] = 0.0f; }
     __syncthreads();
 
-    for (int unit = warp; unit < RowCount * Groups; unit += Wc) {
-        const int row = unit / Groups;
-        const int grp = unit - row * Groups;
-        const int d0  = grp * kKVCacheInt8Group + lane;
-        const int d1  = d0 + 32;
-        int q_head    = 0;
-        int token     = 0;
-        causal_small_t_tc_row_to_qt<Geometry>(row, TokenTile, kv_head, q_head, token);
-        float x0        = __bfloat162float(q[causal_q_index<Geometry>(q_head, d0, token)]);
-        float x1        = __bfloat162float(q[causal_q_index<Geometry>(q_head, d1, token)]);
-        if constexpr (RotateK) {
-            kv_cache_hadamard64(x0, x1, FullMask);
+    if constexpr (RotateK256) {
+        // Q is rotated by the same fixed R the cache stores the keys in, so QK is evaluated in the
+        // rotated basis. One full warp owns one D256 row; the transform never leaves registers.
+        for (int row = warp; row < RowCount; row += Wc) {
+            int q_head = 0;
+            int token  = 0;
+            causal_small_t_tc_row_to_qt<Geometry>(row, TokenTile, kv_head, q_head, token);
+            float q_values[8];
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                const int d = lane + 32 * r;
+                q_values[r] = __bfloat162float(q[causal_q_index<Geometry>(q_head, d, token)]);
+            }
+            normalized_hadamard_d256_inplace(q_values, lane);
+
+#pragma unroll
+            for (int grp = 0; grp < Groups; ++grp) {
+                const int d0    = grp * kKVCacheInt8Group + lane;
+                const int d1    = d0 + 32;
+                const float x0  = q_values[2 * grp];
+                const float x1  = q_values[2 * grp + 1];
+                float amax      = fmaxf(fabsf(x0), fabsf(x1));
+                amax            = warp_max(amax, FullMask);
+                const float qs  = amax > 0.0f ? amax / 127.0f : 0.0f;
+                const float inv = qs > 0.0f ? 1.0f / qs : 0.0f;
+                causal_small_t_i8_store_swz(q_i8, row, d0, DB16, kv_cache_int8_quant_code(x0, inv));
+                causal_small_t_i8_store_swz(q_i8, row, d1, DB16, kv_cache_int8_quant_code(x1, inv));
+                if (lane == 0) { q_scale_tmp[row * Groups + grp] = qs; }
+            }
         }
-        float amax      = fmaxf(fabsf(x0), fabsf(x1));
-        amax            = warp_max(amax, FullMask);
-        const float qs  = amax > 0.0f ? amax / 127.0f : 0.0f;
-        const float inv = qs > 0.0f ? 1.0f / qs : 0.0f;
-        causal_small_t_i8_store_swz(q_i8, row, d0, DB16, kv_cache_int8_quant_code(x0, inv));
-        causal_small_t_i8_store_swz(q_i8, row, d1, DB16, kv_cache_int8_quant_code(x1, inv));
-        if (lane == 0) { q_scale_tmp[row * Groups + grp] = qs; }
+    } else {
+        for (int unit = warp; unit < RowCount * Groups; unit += Wc) {
+            const int row = unit / Groups;
+            const int grp = unit - row * Groups;
+            const int d0  = grp * kKVCacheInt8Group + lane;
+            const int d1  = d0 + 32;
+            int q_head    = 0;
+            int token     = 0;
+            causal_small_t_tc_row_to_qt<Geometry>(row, TokenTile, kv_head, q_head, token);
+            float x0 = __bfloat162float(q[causal_q_index<Geometry>(q_head, d0, token)]);
+            float x1 = __bfloat162float(q[causal_q_index<Geometry>(q_head, d1, token)]);
+            if constexpr (RotateK) { kv_cache_hadamard64(x0, x1, FullMask); }
+            float amax      = fmaxf(fabsf(x0), fabsf(x1));
+            amax            = warp_max(amax, FullMask);
+            const float qs  = amax > 0.0f ? amax / 127.0f : 0.0f;
+            const float inv = qs > 0.0f ? 1.0f / qs : 0.0f;
+            causal_small_t_i8_store_swz(q_i8, row, d0, DB16, kv_cache_int8_quant_code(x0, inv));
+            causal_small_t_i8_store_swz(q_i8, row, d1, DB16, kv_cache_int8_quant_code(x1, inv));
+            if (lane == 0) { q_scale_tmp[row * Groups + grp] = qs; }
+        }
     }
     __syncthreads();
 

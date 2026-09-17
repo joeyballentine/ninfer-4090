@@ -34,7 +34,7 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
 
     const auto tokens = static_cast<std::int32_t>(q.ne[2]);
 #if defined(NINFER_SM89)
-    // Kernel i8 del fork sergiuszm/ninfer-4090 (modos packed int4 / E8).
+    // sm_89 INT8 family: the rotated modes plus the D256-rotated Int8Group64 contract.
     if (cache.storage == KvCacheStorage::RK4V4E8 ||
         cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
         cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
@@ -45,14 +45,14 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
         const Tensor& cache_k_scale = cache.k_scale_pages;
         const Tensor& cache_v_scale = cache.v_scale_pages;
         const auto launch_i8 = [&]<bool PackedV, bool RotateK, bool RotateV, bool PackedK,
-                                   bool E8Root>() {
+                                   bool E8Root, bool RotateK256>() {
             static const cudaError_t attr_i8 = cudaFuncSetAttribute(
                 causal_attention_prompt_i8_kernel<Geometry, PackedV, RotateK, RotateV, PackedK,
-                                                  E8Root, Metadata>,
+                                                  E8Root, RotateK256, Metadata>,
                 cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptI8SmemBytes);
             CUDA_CHECK(attr_i8);
             causal_attention_prompt_i8_kernel<Geometry, PackedV, RotateK, RotateV, PackedK,
-                                              E8Root, Metadata>
+                                              E8Root, RotateK256, Metadata>
                 <<<attention_grid, kCausalPromptI8Threads, kCausalPromptI8SmemBytes, stream>>>(
                     static_cast<const __nv_bfloat16*>(q.data),
                     static_cast<const std::int8_t*>(cache_k.data),
@@ -62,19 +62,21 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
                     static_cast<const std::int32_t*>(positions.data), scale,
                     static_cast<__nv_bfloat16*>(out.data), tokens);
         };
-        // rk4v4 y rk4v4-e8 comparten la misma instancia de carga (K i4, V i4, rotaciones);
-        // la reticula E8 solo interviene al codificar (append), no al leer.
+        // rk4v4 and rk4v4-e8 share one load instantiation (K i4, V i4, rotations); the E8 lattice
+        // only takes part in encoding (append), not in reading.
         if (cache.storage == KvCacheStorage::RK4V4E8 ||
             cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64) {
-            launch_i8.template operator()<true, true, true, true, false>();
+            launch_i8.template operator()<true, true, true, true, false, false>();
         } else if (cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {
-            // rk8v4: K int8 rotada (PackedK=false), V int4 rotada (PackedV=true).
-            launch_i8.template operator()<true, true, true, false, false>();
+            // rk8v4: int8 rotated K (PackedK=false), int4 rotated V (PackedV=true).
+            launch_i8.template operator()<true, true, true, false, false, false>();
         } else if (cache.storage == KvCacheStorage::RK2V4E8) {
-            // rk2v4-e8: la clave se decodifica desde el codigo cilindrico E8 al cargar el tile.
-            launch_i8.template operator()<true, true, true, false, true>();
+            // rk2v4-e8: the key is decoded from the E8 cylinder code while staging the tile.
+            launch_i8.template operator()<true, true, true, false, true, false>();
         } else {
-            launch_i8.template operator()<false, false, false, false, false>();
+            // Int8Group64: the cached key plane holds R*K, so Q takes the same fixed D256
+            // rotation; V stays in the original basis and needs no inverse rotation.
+            launch_i8.template operator()<false, false, false, false, false, true>();
         }
     } else {
         const dim3 attention_grid(static_cast<unsigned>(div_up(tokens, kCausalPromptBr)),
@@ -88,8 +90,8 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
                 static_cast<__nv_bfloat16*>(out.data), tokens);
     }
     CUDA_CHECK(cudaGetLastError());
-    // Los modos con V rotada (rk8v4 / rk4v4 / rk4v4-e8) devuelven el PV al espacio original
-    // con la inversa de la rotacion H64 (self-inverse).
+    // The modes with a rotated V (rk8v4 / rk4v4 / rk4v4-e8 / rk2v4-e8) bring PV back to the
+    // original basis with the inverse H64 rotation (self-inverse).
     if (cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
         cache.storage == KvCacheStorage::RK4V4E8 ||
         cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
