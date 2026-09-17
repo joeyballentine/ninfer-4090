@@ -144,11 +144,17 @@ int main() {
     failure.classification = RequestFailureClass::Internal;
     metrics.record_failure(failure);
     metrics.record_rejected();
+    RequestFailure cancelled;
+    cancelled.phase          = RequestFailurePhase::Transport;
+    cancelled.classification = RequestFailureClass::ClientDisconnected;
+    metrics.record_failure(cancelled);
     const Exposition terminal = parse(metrics.render(gauges(1, 0, 0)));
-    failures += check(terminal.samples.at("ninfer:requests_total") == 5.0,
-                      "failed and rejected requests are not counted as terminal");
+    failures += check(terminal.samples.at("ninfer:requests_total") == 6.0,
+                      "failed, rejected and cancelled requests are not counted as terminal");
     failures += check(terminal.samples.at("ninfer:requests_failed_total") == 2.0,
                       "failed and rejected requests are not counted as failures");
+    failures += check(terminal.samples.at("ninfer:requests_cancelled_total") == 1.0,
+                      "a client disconnect is not counted as a cancellation");
     failures += check(terminal.samples.at("llamacpp:tokens_predicted_total") == 301.0,
                       "a failure must not change token accounting");
 

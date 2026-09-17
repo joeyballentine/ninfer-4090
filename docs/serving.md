@@ -87,7 +87,8 @@ when `--api-key` is set.
 | `llamacpp:tokens_predicted_total` | completion tokens committed by decode |
 | `llamacpp:tokens_predicted_seconds_total` | decode wall seconds |
 | `ninfer:requests_total` | terminal requests: completed, failed, or rejected |
-| `ninfer:requests_failed_total` | terminal requests that produced no completion |
+| `ninfer:requests_failed_total` | terminal requests the server failed or rejected |
+| `ninfer:requests_cancelled_total` | terminal requests whose client disconnected or cancelled |
 | `ninfer:reasoning_tokens_total` | completion tokens attributed to reasoning content |
 | `ninfer:prefix_cache_hit_tokens_total` | prompt tokens served from a reused KV prefix |
 | `ninfer:draft_tokens_total` | speculative draft tokens proposed |

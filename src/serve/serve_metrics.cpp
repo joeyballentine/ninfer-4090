@@ -66,7 +66,9 @@ constexpr Family kPredictedSeconds{"llamacpp:tokens_predicted_seconds_total", "c
 constexpr Family kRequests{"ninfer:requests_total", "counter",
                            "Terminal requests, whether they completed, failed, or were rejected."};
 constexpr Family kRequestsFailed{"ninfer:requests_failed_total", "counter",
-                                 "Terminal requests that did not produce a completion."};
+                                 "Terminal requests the server failed or rejected."};
+constexpr Family kRequestsCancelled{"ninfer:requests_cancelled_total", "counter",
+                                    "Terminal requests whose client disconnected or cancelled."};
 constexpr Family kReasoningTokens{"ninfer:reasoning_tokens_total", "counter",
                                   "Completion tokens attributed to reasoning content."};
 constexpr Family kPrefixCacheHits{"ninfer:prefix_cache_hit_tokens_total", "counter",
@@ -204,10 +206,17 @@ void ServeMetrics::record_done(const GenerationOutcome& outcome) {
     speculative_accepted_tokens_total_ += metrics.speculative_accepted_tokens;
 }
 
-void ServeMetrics::record_failure(const RequestFailure&) {
+void ServeMetrics::record_failure(const RequestFailure& failure) {
+    // An agent client that abandons a request is a normal outcome, not a server fault; keeping it
+    // out of the failure counter is what makes that counter usable as an alerting signal.
+    const bool cancelled = failure.classification == RequestFailureClass::ClientDisconnected;
     const std::lock_guard lock(mutex_);
     ++requests_total_;
-    ++requests_failed_total_;
+    if (cancelled) {
+        ++requests_cancelled_total_;
+    } else {
+        ++requests_failed_total_;
+    }
 }
 
 void ServeMetrics::record_rejected() {
@@ -226,6 +235,7 @@ std::string ServeMetrics::render(const ExecutorGauges& gauges) const {
     append_sample(out, kPredictedSeconds, tokens_predicted_seconds_total_);
     append_sample(out, kRequests, requests_total_);
     append_sample(out, kRequestsFailed, requests_failed_total_);
+    append_sample(out, kRequestsCancelled, requests_cancelled_total_);
     append_sample(out, kReasoningTokens, reasoning_tokens_total_);
     append_sample(out, kPrefixCacheHits, prefix_cache_hit_tokens_total_);
     append_sample(out, kDraftTokens, speculative_draft_tokens_total_);

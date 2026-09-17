@@ -70,7 +70,8 @@ public:
     void record_done(const GenerationOutcome& outcome);
 
     // A request that parsed and then failed, and a request rejected during validation. Both are
-    // terminal, so `ninfer:requests_total` counts every request exactly once.
+    // terminal, so `ninfer:requests_total` counts every request exactly once. A client that
+    // disconnects or cancels is terminal but not a server fault and is counted apart.
     void record_failure(const RequestFailure& failure);
     void record_rejected();
 
@@ -83,6 +84,7 @@ private:
     mutable std::mutex mutex_;
     std::uint64_t requests_total_                    = 0;
     std::uint64_t requests_failed_total_             = 0;
+    std::uint64_t requests_cancelled_total_          = 0;
     std::uint64_t prompt_tokens_total_               = 0;
     double prompt_seconds_total_                     = 0.0;
     std::uint64_t tokens_predicted_total_            = 0;
