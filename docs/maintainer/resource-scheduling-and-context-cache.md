@@ -557,7 +557,7 @@ record 变成一个 catalogued continuation。它不引入任何新的物理 aut
 |---|---|
 | device KV 页放不进 `physical_peak_fits` | 挤掉一个 resident owner 等于用未验证的 disk source 换掉已证明可用的内存 source |
 | 没有空闲 catalog slot 或没有未绑定的 execution row | 同上，二者都不从 resident owner 手里抢 |
-| record 或 Program 带 speculative backend KV pool | 第二个 KV pool 的装配没有实现；而且 MTP 下一个被复用的 checkpoint 只有在 draft KV 也回来时才是 materializable 的（见 §4.6 的 `mtp_kv_valid` 检查） |
+| record 或 Program 带 speculative backend KV pool | 第二个 KV pool 的装配没有实现；而且 MTP 下一个被复用的 checkpoint 只有在 draft KV 也回来时才是 materializable 的（`request_plan.cpp` 里的 `mtp_kv_valid` 检查） |
 | checkpoint 种类不是 `SessionEndpoint` | endpoint 的 frontier 就是 owner 的 execution frontier，这才让 record 里的 rope delta 与 execution frontier 描述的是同一个位置；rewrite checkpoint、long anchor 与 shared prefix 落在 execution frontier 之前，需要各自的 continuation 形状 |
 | 三段身份数据缺任何一段 | 只能 shortlist 而无法 exact verify 的 continuation 是 disk 命中唯一可能返回别人 token 的路径 |
 | 有未结的 context transaction | 逻辑状态在事务中不可变更 |
@@ -1238,6 +1238,9 @@ Context cache disabled 时采用 root-only 语义：不读取或发布 inactive 
 | Host KV extents | `src/models/qwen3_5/program/storage/host_kv_store.h` |
 | persistent tier policy、spill/restore 状态机 | `src/runtime/engine/context_cache/context_disk_tier.h` |
 | on-disk 格式、journal、LRU 与 mark-and-sweep | `src/runtime/engine/context_cache/context_disk_store.h` |
+| record 的物理 capture/restore 与载荷格式 | `src/models/qwen3_5/program/prompt_cache_port.h` |
+| record 的 adoption 事务 | `src/models/qwen3_5/program/transactions/prompt_cache_adopt.cpp` |
+| exact identity 的字节编码 | `src/models/qwen3_5/program/prefix_identity.h` |
 | positional/O_DIRECT 文件原语 | `src/core/positional_file.h` |
 | public capacity options | `include/ninfer/types.h` |
 
