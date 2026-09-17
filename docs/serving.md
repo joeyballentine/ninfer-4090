@@ -590,9 +590,9 @@ undeclared model output remains ordinary text. `allowed_tools` with mode `auto` 
 without changing declaration order, while `tool_choice:"none"` disables structured tool output even
 when the history contains earlier calls.
 
-NInfer does not execute functions or enforce JSON Schema through constrained decoding, so
-`strict:true`, required or named tool choice, hosted tools, remote MCP tools, and custom free-form
-tools are rejected. Deferred loading, output schemas, and caller restrictions that exclude direct
+NInfer does not execute functions, and the grammar-constrained sampler is reserved for
+`response_format`: a tool schema is not enforced during decoding. So `strict:true`, required or
+named tool choice, hosted tools, remote MCP tools, and custom free-form tools are rejected. Deferred loading, output schemas, and caller restrictions that exclude direct
 invocation are also rejected because their semantics cannot be honored.
 
 ### Response object and usage
@@ -712,10 +712,13 @@ curl http://127.0.0.1:8080/v1/responses/input_tokens \
 {"object":"response.input_tokens","input_tokens":11}
 ```
 
+`text.format` carries the same enforced structured output as Chat Completions `response_format`;
+see that section for what enforcement covers and which combinations are rejected.
+
 Unsupported Create fields include Conversations, prompt templates, context management, hosted
-moderation, Structured Outputs/JSON mode, non-empty `include`, background execution, compaction,
-files/audio, and OpenAI-hosted/MCP/custom tools. These are compatibility boundaries, not silently
-accepted placeholders.
+moderation, non-empty `include`, background execution, compaction, files/audio, and
+OpenAI-hosted/MCP/custom tools. These are compatibility boundaries, not silently accepted
+placeholders.
 
 ## Anthropic Messages
 
