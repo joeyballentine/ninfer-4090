@@ -6,6 +6,12 @@ Anthropic-protocol tools), long repository contexts, and structured tool-call ou
 the upstream sync state, the measured limits of the card, the configuration to run today, and the
 engineering candidates ranked by payoff.
 
+> **Superseded by the v3 port.** Branch `claude/v3-sm89-port` rebuilds this work on top of
+> Neroued/ninfer v3 master (DFlash2, Jinja templates, perplexity evaluator) with the sm_89 layer,
+> `rk8v4`/`rk2v4-e8`, prompt-lookup drafting, MTP K up to 15, structured JSON output, `/metrics`,
+> and calibrated converter methods (`grouped_mse`, `grouped_gptq`). Items 1, 3, 4, 5 and the
+> Q6-embedding part of 7 below are done there; 2 (INT8/FP8 prefill) and 6 (per-layer KV) remain.
+
 ## Upstream sync state
 
 | Source | Relationship | State on this branch |
