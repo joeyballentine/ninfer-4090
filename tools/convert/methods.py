@@ -24,7 +24,14 @@ from tools.artifact.formats import (
 from tools.artifact.schema import TensorSpec
 from tools.artifact.tensor_output import TensorOutput
 
+from .calibration import HessianStore
 from .quantization.fp8_row import quantize_bf16_rows
+from .quantization.gptq import (
+    GPTQ_BLOCK_SIZE,
+    GPTQ_DAMPING,
+    gptq_plan,
+    gptq_quantize_rows,
+)
 from .quantization.groupwise import MSE_CANDIDATES, quantize_matrix, quantize_matrix_mse
 from .sources.logical import EncodedRows, LogicalSource
 
@@ -261,6 +268,72 @@ def grouped_mse(request: PrepareRequest) -> PreparedMethod:
     return request.job(produce=produce)
 
 
+def grouped_gptq(request: PrepareRequest) -> PreparedMethod:
+    """Select codes with GPTQ error compensation against a calibration Hessian."""
+    n, k = _integer_matrix(request, "grouped_gptq")
+    _preflight(
+        request,
+        parameters=(
+            "calibration",
+            "block_size",
+            "damping",
+            "act_order",
+            "mse",
+            "candidates",
+        ),
+    )
+    directory = request.parameters.get("calibration")
+    if not isinstance(directory, str) or not directory:
+        raise ValueError("grouped_gptq requires a calibration directory")
+    block_size = _integer_parameter(request, "block_size", GPTQ_BLOCK_SIZE)
+    damping = request.parameters.get("damping", GPTQ_DAMPING)
+    if type(damping) is not float or not 0.0 < damping < 1.0:
+        raise ValueError("damping must be a fraction in (0, 1)")
+    act_order = request.parameters.get("act_order", False)
+    mse = request.parameters.get("mse", False)
+    if type(act_order) is not bool or type(mse) is not bool:
+        raise ValueError("act_order and mse must be boolean")
+    candidates = _integer_parameter(request, "candidates", MSE_CANDIDATES) if mse else 1
+    store = HessianStore(directory)
+    sites = []
+    for item in request.inputs:
+        if len(item.source.shape) != 2 or item.source.shape[1] != k:
+            raise ValueError(f"{item.parameter}: GPTQ requires complete [N,K] rows")
+        if len(item.uses) != 1:
+            raise ValueError(
+                f"{item.parameter}: GPTQ needs exactly one mathematical input,"
+                f" got {len(item.uses)}"
+            )
+        sites.append(item.uses[0][1])
+
+    def produce(output):
+        row = 0
+        for item, site in zip(request.inputs, sites):
+            plan = gptq_plan(
+                request.target.format,
+                k,
+                store.hessian(site, k),
+                device=request.device,
+                block_size=block_size,
+                damping=damping,
+                act_order=act_order,
+                candidates=candidates,
+            )
+            rows = item.source.shape[0]
+            for begin in range(0, rows, request.rows_per_chunk):
+                end = min(rows, begin + request.rows_per_chunk)
+                values = item.source.rows(begin, end)
+                if not values.dtype.is_floating_point:
+                    raise TypeError(
+                        "grouped_gptq source must provide floating-point values"
+                    )
+                encoded = gptq_quantize_rows(plan, values)
+                output.write_codes(row + begin, encoded.codes, encoded.scales)
+            row += rows
+
+    return request.job(produce=produce)
+
+
 def fp8_row_maxabs(request: PrepareRequest) -> PreparedMethod:
     """Round inputs to BF16, then quantize to FP8 codes with BF16 row scales."""
     if request.target.format != "fp8_e4m3fn_row_bf16" or len(request.target.shape) != 2:
@@ -339,6 +412,7 @@ METHODS: dict[str, Method] = {
     "cast_direct": cast_direct,
     "grouped_absmax": grouped_absmax,
     "grouped_mse": grouped_mse,
+    "grouped_gptq": grouped_gptq,
     "fp8_row_maxabs": fp8_row_maxabs,
     "import_encoded": import_encoded,
 }

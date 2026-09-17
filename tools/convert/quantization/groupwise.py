@@ -144,6 +144,60 @@ def group_importance(
     return padded.reshape(1, geometry.groups_per_row, spec.group_size)
 
 
+def search_group_scales(
+    grouped: torch.Tensor,
+    spec: QuantFormat,
+    candidates: int,
+    *,
+    importance: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Choose one clipping factor per group of a ``[...,group_size]`` tensor.
+
+    Every candidate scale passes through the canonical binary16 word, so the
+    search only reorders choices the stored format can already represent.  The
+    factors descend from one and ties keep the earlier, larger factor, which
+    makes a single candidate identical to the plain absmax scale.  ``importance``
+    broadcasts against *grouped* and weights the squared error per channel.
+    """
+
+    factors = clipping_factors(candidates)
+    device = grouped.device
+    host_max = grouped.abs().amax(dim=-1).detach().cpu().to(torch.float32)
+    if len(factors) == 1:
+        words, reciprocal = _canonical_scale_words(host_max, spec.qmax)
+        return words.to(device), reciprocal.to(device)
+
+    shape = tuple(host_max.shape)
+    count = len(factors)
+    scale_words = torch.empty((*shape, count), dtype=torch.float16)
+    reciprocals = torch.empty((*shape, count), dtype=torch.float32)
+    errors = torch.empty((*shape, count), dtype=torch.float32, device=device)
+    for index, factor in enumerate(factors):
+        clipped = (host_max.to(torch.float64) * factor).to(torch.float32)
+        words, reciprocal = _canonical_scale_words(clipped, spec.qmax)
+        scale_words[..., index] = words
+        reciprocals[..., index] = reciprocal
+        codes = group_codes(grouped, reciprocal.to(device), spec)
+        chosen = words.to(device=device, dtype=torch.float32).unsqueeze(-1)
+        residual = grouped - codes * chosen
+        residual = residual * residual
+        if importance is not None:
+            residual = residual * importance
+        errors[..., index] = residual.sum(dim=-1)
+
+    best = errors[..., 0].clone()
+    choice = torch.zeros(shape, dtype=torch.int64, device=device)
+    for index in range(1, count):
+        improved = errors[..., index] < best
+        best = torch.where(improved, errors[..., index], best)
+        choice = torch.where(improved, index, choice)
+
+    picked = choice.detach().cpu().unsqueeze(-1)
+    scales = torch.gather(scale_words, -1, picked).squeeze(-1).to(device)
+    reciprocal = torch.gather(reciprocals, -1, picked).squeeze(-1).to(device)
+    return scales, reciprocal
+
+
 def quantize_matrix(
     weight: torch.Tensor,
     format: str | QuantFormat,
@@ -186,41 +240,13 @@ def quantize_matrix_mse(
 
     spec, grouped, target = _grouped_values(weight, format, device)
     geometry = row_split_geometry(spec, weight.shape)
-    factors = clipping_factors(candidates)
-    n, groups, _ = grouped.shape
     channel_weight = (
         None
         if importance is None
         else group_importance(importance, spec, geometry, target)
     )
-
-    host_max = grouped.abs().amax(dim=2).detach().cpu().to(torch.float32)
-    count = len(factors)
-    scale_words = torch.empty((n, groups, count), dtype=torch.float16)
-    reciprocals = torch.empty((n, groups, count), dtype=torch.float32)
-    errors = torch.empty((n, groups, count), dtype=torch.float32, device=target)
-    for index, factor in enumerate(factors):
-        clipped = (host_max.to(torch.float64) * factor).to(torch.float32)
-        words, reciprocal = _canonical_scale_words(clipped, spec.qmax)
-        scale_words[:, :, index] = words
-        reciprocals[:, :, index] = reciprocal
-        codes = group_codes(grouped, reciprocal.to(target), spec)
-        chosen = words.to(device=target, dtype=torch.float32).unsqueeze(-1)
-        residual = grouped - codes * chosen
-        residual = residual * residual
-        if channel_weight is not None:
-            residual = residual * channel_weight
-        errors[:, :, index] = residual.sum(dim=2)
-
-    best = errors[:, :, 0].clone()
-    choice = torch.zeros((n, groups), dtype=torch.int64, device=target)
-    for index in range(1, count):
-        improved = errors[:, :, index] < best
-        best = torch.where(improved, errors[:, :, index], best)
-        choice = torch.where(improved, index, choice)
-
-    picked = choice.detach().cpu().unsqueeze(-1)
-    scales = torch.gather(scale_words, 2, picked).squeeze(-1).to(target)
-    reciprocal = torch.gather(reciprocals, 2, picked).squeeze(-1).to(target)
+    scales, reciprocal = search_group_scales(
+        grouped, spec, candidates, importance=channel_weight
+    )
     codes = group_codes(grouped, reciprocal, spec).to(torch.int8)
     return QuantizedMatrix(codes=codes, scales=scales)
