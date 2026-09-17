@@ -1,14 +1,16 @@
 cmake_minimum_required(VERSION 3.28)
 
-# The current implementation is compiled only for sm_120a. Set and validate the
-# architecture before CUDA compiler detection so CMake never injects a generic
-# host-toolchain default or accepts an unsupported target.
+# The reference implementation is compiled for sm_120a (RTX 5090). sm_89 (RTX 4090)
+# is supported for the architecture-generic kernel set (bf16/fp8/k8v4 paths); the
+# warp-specialized SM120 NVFP4 W4A4 TMA kernels are excluded from non-120 builds
+# (see src/CMakeLists.txt). Validate the architecture before CUDA compiler detection
+# so CMake never injects a generic host-toolchain default or accepts an unsupported target.
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 120a CACHE STRING "CUDA architectures to build")
 endif()
-if(NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
+if(NOT CMAKE_CUDA_ARCHITECTURES MATCHES "^(120a|89)$")
   message(FATAL_ERROR
-    "NInfer supports only CMAKE_CUDA_ARCHITECTURES=120a; got "
+    "NInfer supports CMAKE_CUDA_ARCHITECTURES=120a or 89; got "
     "'${CMAKE_CUDA_ARCHITECTURES}'")
 endif()
 
@@ -26,6 +28,27 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)        # clangd / IDE tooling
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
+endif()
+
+# sm_89 (RTX 4090) builds enable the capped-shared-memory w8 kernel variants (see
+# src/ops/linear/w8/w8_config.h); the 120a build keeps its default high-memory schedules.
+if(CMAKE_CUDA_ARCHITECTURES MATCHES "89")
+  add_compile_definitions(NINFER_SM89=1)
+endif()
+
+if(MSVC)
+  add_compile_definitions(NOMINMAX UTF8PROC_STATIC)
+  add_compile_options(
+    $<$<COMPILE_LANGUAGE:C>:/Zc:preprocessor>
+    $<$<COMPILE_LANGUAGE:C>:/FS>
+    $<$<COMPILE_LANGUAGE:C>:/utf-8>
+    $<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>
+    $<$<COMPILE_LANGUAGE:CXX>:/FS>
+    $<$<COMPILE_LANGUAGE:CXX>:/utf-8>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/FS>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>
+  )
 endif()
 
 if(CMAKE_GENERATOR MATCHES "Ninja")

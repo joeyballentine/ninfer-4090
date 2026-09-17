@@ -30,6 +30,11 @@ __global__ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void q8_ksplit_gr
     static_assert(KSplits == 2 || KSplits == 4 || KSplits == 8);
     static_assert(TileCols % NGroups == 0 && kWarpCols % 8 == 0);
     static_assert(Hidden % kGroupK == 0 && kKernelWarps <= 32);
+#if defined(NINFER_SM89)
+    static_assert(16 * kGroupK + kKernelWarps * kWarpCols * kTileK * 2 <=
+                      kQ8KSplitStaticSharedLimit,
+                  "sm_89 static shared memory limit: this grouped K-split schedule does not fit");
+#endif
 
     __shared__ __align__(16) std::uint8_t code_shared[kMmaRows][kGroupK];
     __shared__ __align__(16) __nv_bfloat16 b_shared[kKernelWarps][kWarpCols * kTileK];

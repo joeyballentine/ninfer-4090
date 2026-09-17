@@ -8,6 +8,7 @@
 
 #include <cuda_bf16.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -90,6 +91,10 @@ constexpr auto make_launchers(std::index_sequence<Offsets...>) {
 constexpr auto kLaunchers =
     make_launchers(std::make_index_sequence<kLastExactT - kFirstExactT + 1>{});
 
+#if !defined(NINFER_SM89)
+// The medium-T grouped split-K kernel stages KSplits * (1024 + 128 * TileCols) bytes, which
+// exceeds the 48 KiB static shared memory limit of sm_89 for every registered schedule; that
+// architecture routes medium T through exact-T/decode slices (see the launcher below).
 template <int TileCols, int KSplits, int NGroups, int MinBlocks>
 void launch_medium(const Tensor& x, const Weight& first_weight, const Weight& second_weight,
                    Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
@@ -106,6 +111,7 @@ void launch_medium(const Tensor& x, const Weight& first_weight, const Weight& se
         <<<(2 * kRows) / 16, KSplits * NGroups * 32, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data), first_codes, first_scales, output, x.ne[1]);
 }
+#endif
 
 } // namespace
 
@@ -129,6 +135,27 @@ void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
         first_out.ne[1] != x.ne[1] || second_out.ne[0] != kRows || second_out.ne[1] != x.ne[1]) {
         throw std::invalid_argument("Q8 medium pair requires [1024,2048] and T>=33");
     }
+#if defined(NINFER_SM89)
+    // sm_89: chunk the medium T into exact-T slices (32) plus a decode_r16 tail.
+    (void)schedule;
+    std::int32_t offset = 0;
+    while (offset < x.ne[1]) {
+        const std::int32_t count = std::min<std::int32_t>(kLastExactT, x.ne[1] - offset);
+        const Tensor x_slice     = x.slice(1, offset, count);
+        Tensor first_slice       = first_out.slice(1, offset, count);
+        Tensor second_slice      = second_out.slice(1, offset, count);
+        if (count == 1) {
+            q8_pair_decode_r16_launch(x_slice, first_weight, second_weight, first_slice,
+                                      second_slice, stream);
+        } else {
+            q8_pair_splitk_exact_t_launch(x_slice, first_weight, second_weight, first_slice,
+                                          second_slice, stream);
+        }
+        offset += count;
+    }
+    CUDA_CHECK(cudaGetLastError());
+    return;
+#else
     switch (schedule) {
     case Q8PairScheduleId::DualSplitKMediumC48:
         if (x.ne[1] <= 48) {
@@ -230,6 +257,7 @@ void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
         break;
     }
     throw std::invalid_argument("Q8 medium pair schedule does not cover this T");
+#endif
 }
 
 } // namespace ninfer::ops::detail

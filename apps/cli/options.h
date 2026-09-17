@@ -29,6 +29,8 @@ struct Options {
     SpeculativeOptions speculative;
     bool enable_vision  = false;
     bool use_cuda_graph = true;
+    // Opt-in aggressive WDDM memory budgeting against total VRAM on dedicated GPUs (Windows only).
+    bool wddm_evictable_budget = false;
 
     bool raw_output      = false;
     bool print_token_ids = false;

@@ -80,6 +80,8 @@ enum class RewriteCheckpointKind : std::uint8_t {
 struct RewriteCheckpointSpec {
     RewriteCheckpointKind kind = RewriteCheckpointKind::TurnClosure;
     std::uint32_t frontier     = 0;
+
+    [[nodiscard]] bool operator==(const RewriteCheckpointSpec&) const = default;
 };
 
 struct PromptIdentity {

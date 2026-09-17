@@ -36,15 +36,13 @@ struct PrefillWork {
     result.tokens                       = suffix_tokens;
     result.vision_items                 = vision_items;
     result.vision_patches               = vision_patches;
-    const unsigned __int128 suffix      = suffix_tokens;
-    const unsigned __int128 linear      = static_cast<unsigned __int128>(prefix_tokens) * suffix;
-    const unsigned __int128 triangular  = suffix * (suffix + 1U) / 2U;
-    constexpr unsigned __int128 maximum = ~static_cast<unsigned __int128>(0);
-    const unsigned __int128 attention =
+        const std::uint64_t suffix      = suffix_tokens;
+    const std::uint64_t linear      = static_cast<std::uint64_t>(prefix_tokens) * suffix;
+    const std::uint64_t triangular  = suffix * (suffix + 1U) / 2U;
+    constexpr std::uint64_t maximum = ~(std::uint64_t)0;
+    const std::uint64_t attention =
         triangular > maximum - linear ? maximum : linear + triangular;
-    result.attention_pairs = attention > std::numeric_limits<std::uint64_t>::max()
-                                 ? std::numeric_limits<std::uint64_t>::max()
-                                 : static_cast<std::uint64_t>(attention);
+    result.attention_pairs = attention;
     return result;
 }
 
@@ -400,3 +398,4 @@ struct KvCapacityResolution {
 };
 
 } // namespace ninfer::runtime
+

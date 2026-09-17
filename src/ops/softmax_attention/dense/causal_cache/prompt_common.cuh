@@ -26,6 +26,13 @@ inline constexpr int kCausalPromptSmemBytes = (kCausalPromptBr + 2 * kCausalProm
                                               static_cast<int>(sizeof(__nv_bfloat16));
 
 template <typename Geometry>
+__device__ __forceinline__ std::int64_t causal_prompt_q_row_offset(int q_head, int token) {
+    return static_cast<std::int64_t>(kCausalPromptHeadDim) *
+           (static_cast<std::int64_t>(q_head) +
+            static_cast<std::int64_t>(Geometry::QHeads) * token);
+}
+
+template <typename Geometry>
 __device__ __forceinline__ std::int64_t causal_prompt_q_index(int q_head, int d, int token) {
     return static_cast<std::int64_t>(d) + static_cast<std::int64_t>(kCausalPromptHeadDim) *
                                               (static_cast<std::int64_t>(q_head) +

@@ -103,6 +103,25 @@ void launch_nvfp4_a4_tma(const Weight& weight, Tensor& out, Nvfp4W4a4Workspace s
                                  static_cast<__nv_bfloat16*>(out.data), tokens, alpha, stream);
 }
 
+#if defined(NINFER_SM89)
+// W4A4 contracts through the Blackwell block-scaled FP4 MMA (kind::mxf4nvf4), and above the TMA
+// floor through TMA as well; neither exists on sm_89. The shapes still state their measured A4
+// routes, and both route kinds resolve to this rejection so no Blackwell GEMM is instantiated
+// here. Defined in ops/nvfp4_w4a4_stubs.cpp, which this build compiles in their place.
+[[noreturn]] void nvfp4_a4_unsupported(const Weight& weight, Tensor& out,
+                                       Nvfp4W4a4Workspace workspace, std::int32_t tokens,
+                                       cudaStream_t stream);
+
+template <Nvfp4GeometryId Geometry>
+constexpr Nvfp4A4Route nvfp4_a4_tma_route() {
+    return {nvfp4_a4_unsupported, Nvfp4ScaleLayout::Tiled};
+}
+
+template <class Geometry, class Schedule>
+constexpr Nvfp4A4Route nvfp4_a4_mma_route() {
+    return {nvfp4_a4_unsupported, Nvfp4ScaleLayout::RowMajor};
+}
+#else
 // The TMA GEMM reads the tiled plane; every MMA GEMM reads the row-major one. Stating that here,
 // once per kind, is what keeps a shape from pairing them the other way round.
 template <Nvfp4GeometryId Geometry>
@@ -114,12 +133,18 @@ template <class Geometry, class Schedule>
 constexpr Nvfp4A4Route nvfp4_a4_mma_route() {
     return {launch_nvfp4_a4_mma<Geometry, Schedule>, Nvfp4ScaleLayout::RowMajor};
 }
+#endif
 
 template <Nvfp4A4Route (*Select)(std::int32_t)>
 void launch_nvfp4_a4(const Tensor& x, const Weight& weight, Tensor& out, Nvfp4W4a4Workspace scratch,
                      cudaStream_t stream) {
     const Nvfp4A4Route route = Select(x.ne[1]);
+#if defined(NINFER_SM89)
+    // Reject before the quantizer runs: the plane it would write has no GEMM to read it.
+    route.launch(weight, out, scratch, x.ne[1], stream);
+#else
     launch_nvfp4_w4a4_quantize(x, weight, scratch, route.scales, stream);
     route.launch(weight, out, scratch, x.ne[1], stream);
+#endif
 }
 } // namespace ninfer::ops::detail

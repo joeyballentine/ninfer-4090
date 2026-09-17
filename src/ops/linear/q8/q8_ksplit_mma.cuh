@@ -105,6 +105,12 @@ q8_ksplit_mma(const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restric
     using SharedStorage = Q8KSplitSharedStorage<Schedule>;
 
     constexpr bool kDynamicShared = TiledColumns && ActiveCols > 64;
+#if defined(NINFER_SM89)
+    // The dynamic arm is opted in per launch with cudaFuncSetAttribute and reaches the larger
+    // sm_89 budget; the static arm is what the 48 KiB block limit binds.
+    static_assert(kDynamicShared || sizeof(SharedStorage) <= kQ8KSplitStaticSharedLimit,
+                  "sm_89 static shared memory limit: this K-split schedule does not fit");
+#endif
     __shared__ __align__(
         16) unsigned char static_shared[kDynamicShared ? 1 : sizeof(SharedStorage)];
     extern __shared__ __align__(16) unsigned char dynamic_shared[];

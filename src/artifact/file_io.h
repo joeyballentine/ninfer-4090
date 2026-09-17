@@ -24,9 +24,16 @@ public:
 
 private:
     std::filesystem::path path_;
+#if defined(_WIN32)
+    // Win32 HANDLEs held as void* so <windows.h> stays out of this header. A closed handle is
+    // nullptr; INVALID_HANDLE_VALUE never escapes the implementation.
+    void* handle_                = nullptr;
+    mutable void* direct_handle_ = nullptr;
+#else
     int fd_                = -1;
     mutable int direct_fd_ = -1;
-    std::uint64_t bytes_   = 0;
+#endif
+    std::uint64_t bytes_ = 0;
 };
 
 } // namespace ninfer::artifact

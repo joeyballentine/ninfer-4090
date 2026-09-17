@@ -2252,6 +2252,16 @@ int run_geometry(const Geometry& geometry) {
             failures += run_a3_case(geometry, storage, {1, 128, 129, 191u}, mapping);
         }
 
+        if (storage == KvCacheStorage::Int8Group64) {
+            // The six-plus-token int8 route caps its split count to one resident wave between
+            // 5000 and 8198 visible keys. No other case in this suite reaches that window, and
+            // the cap decides both the launched grid and the per-split key extent.
+            failures += run_a1_case(geometry, storage, {6, 6994, 7000, 501u},
+                                    MappingPattern::Identity);
+            failures += run_a3_case(geometry, storage, {6, 6994, 7000, 502u},
+                                    MappingPattern::Identity);
+        }
+
         const AttentionCase a1_cases[] = {
             {1, 0, 1, 201u},    {6, 17, 23, 202u},   {7, 17, 512, 203u},
             {17, 31, 48, 204u}, {66, 63, 129, 205u},
@@ -2430,6 +2440,12 @@ int run_softmax_attention_nvfp4_tests() {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
+#if defined(NINFER_SM89)
+    // KV NVFP4 (Nvfp4Group16) kernels are SM120 (Blackwell) only upstream;
+    // los stubs de build SM89 lanzan std::runtime_error.
+    std::cout << "SKIP: nvfp4 KV attention requires SM120 (Blackwell) kernels\n";
+    return 77;
+#endif
     int failures = run_nvfp4_cases();
     failures += run_quantized_batch_cases(KvCacheStorage::Nvfp4Group16, 720u);
     failures += report_quantization_quality(KvCacheStorage::Nvfp4Group16, 724u);
@@ -2443,6 +2459,11 @@ int run_softmax_attention_k8v4_tests() {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
+#if defined(NINFER_SM89)
+    // KV k8v4 (Fp8KeyNvfp4Value) kernels are SM120 (Blackwell) only upstream.
+    std::cout << "SKIP: k8v4 KV attention requires SM120 (Blackwell) kernels\n";
+    return 77;
+#endif
     int failures = run_k8v4_cases();
     failures += run_quantized_batch_cases(KvCacheStorage::Fp8KeyNvfp4Value, 815u);
     failures += report_quantization_quality(KvCacheStorage::Fp8KeyNvfp4Value, 819u);
@@ -2458,12 +2479,15 @@ int run_softmax_attention_causal_cache_tests() {
     }
 
     int failures = verify_workspace_capacity_contract();
+#if !defined(NINFER_SM89)
+    // NVFP4 / k8v4 sub-cases: kernels are SM120 (Blackwell) only upstream.
     failures += run_nvfp4_cases();
     failures += run_quantized_batch_cases(KvCacheStorage::Nvfp4Group16, 720u);
     failures += report_quantization_quality(KvCacheStorage::Nvfp4Group16, 724u);
     failures += run_k8v4_cases();
     failures += run_quantized_batch_cases(KvCacheStorage::Fp8KeyNvfp4Value, 815u);
     failures += report_quantization_quality(KvCacheStorage::Fp8KeyNvfp4Value, 819u);
+#endif
     for (const Geometry& geometry : kGeometries) { failures += run_geometry(geometry); }
     failures += run_fp8_cases();
     failures += run_batch_cases();

@@ -5,6 +5,7 @@
 #include "ops/linear/q8/q8_ksplit_mma.cuh"
 #include "ops/linear/q8/q8_ksplit_grouped_mma.cuh"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <stdexcept>
@@ -60,6 +61,10 @@ constexpr auto kK4096ProjectionLaunchers = make_projection_launchers<4096>(
 constexpr auto kK6144ProjectionLaunchers = make_projection_launchers<6144>(
     std::make_index_sequence<kLastExactCols - kFirstExactCols + 1>{});
 
+#if !defined(NINFER_SM89)
+// The medium-T grouped split-K kernel stages KSplits * (1024 + 128 * TileCols) bytes, which
+// exceeds the 48 KiB static shared memory limit of sm_89 for every registered schedule; that
+// architecture routes medium T through exact-T/decode slices (see the launcher below).
 template <int Hidden, int TileCols, int KSplits, int NGroups, int MinBlocks>
 void launch_medium(const Tensor& x, Tensor& residual_out, const Weight& weight,
                    cudaStream_t stream) {
@@ -79,6 +84,7 @@ void dispatch_medium_shape(const Tensor& x, const Weight& weight, Tensor& residu
         launch_medium<6144, TileCols, KSplits, NGroups, MinBlocks>(x, residual_out, weight, stream);
     }
 }
+#endif
 
 } // namespace
 
@@ -101,6 +107,25 @@ void q8_linear_add_medium_splitk_launch(const Tensor& x, const Weight& weight, T
     if ((weight.k != 4096 && weight.k != 6144) || t < 49 || t > 128) {
         throw std::invalid_argument("Q8 linear_add medium split-K requires T=49..128");
     }
+#if defined(NINFER_SM89)
+    // sm_89: cover medium T with exact-T split-K slices plus a decode tail.
+    std::int32_t offset = 0;
+    while (offset < t) {
+        const std::int32_t count = std::min<std::int32_t>(kLastExactCols, t - offset);
+        const Tensor x_slice     = x.slice(1, offset, count);
+        Tensor residual_slice    = residual_out.slice(1, offset, count);
+        if (count == 1) {
+            if (weight.k == 6144) {
+                q8_linear_add_decode_r16_launch(x_slice, weight, residual_slice, stream);
+            } else {
+                q8_linear_add_simt_r8_c4_launch(false, x_slice, weight, residual_slice, stream);
+            }
+        } else {
+            q8_linear_add_splitk_mma_launch(x_slice, weight, residual_slice, stream);
+        }
+        offset += count;
+    }
+#else
     if (t <= 64) {
         dispatch_medium_shape<64, 8, 4, 1>(x, weight, residual_out, stream);
     } else if (t == 65) {
@@ -120,6 +145,7 @@ void q8_linear_add_medium_splitk_launch(const Tensor& x, const Weight& weight, T
     } else {
         dispatch_medium_shape<128, 4, 8, 1>(x, weight, residual_out, stream);
     }
+#endif
     CUDA_CHECK(cudaGetLastError());
 }
 

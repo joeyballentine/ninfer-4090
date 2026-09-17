@@ -89,10 +89,15 @@ int verify_preserved(const GuardedDeviceBuffer& device, std::span<const std::uin
 }
 
 int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
+#if !defined(NINFER_SM89)
     const std::int32_t first_a4 = k == 6144 ? 7 : 8;
+#endif
     const std::array invocations{
         Invocation{1, ops::LinearPolicy::A16Only},
         Invocation{4, ops::LinearPolicy::A16Only},
+#if !defined(NINFER_SM89)
+        // NVFP4 W4A4 needs the Blackwell FP4 MMA; sm_89 builds compile the stub instead,
+        // which rejects the route at runtime (see src/ops/nvfp4_w4a4_stubs.cpp).
         Invocation{first_a4, ops::LinearPolicy::AllowA4},
         Invocation{17, ops::LinearPolicy::AllowA4},
         Invocation{8, ops::LinearPolicy::AllowA4},
@@ -108,6 +113,7 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
         Invocation{1023, ops::LinearPolicy::AllowA4},
         Invocation{1024, ops::LinearPolicy::AllowA4},
         Invocation{1025, ops::LinearPolicy::AllowA4},
+#endif
     };
     // The invocation list is what drives the host buffers, so take the bound from it rather than
     // from a literal that silently caps it.

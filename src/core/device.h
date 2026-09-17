@@ -11,6 +11,22 @@ void cuda_check(cudaError_t err, const char* expr, const char* file, int line);
 
 #define CUDA_CHECK(expr) ::ninfer::cuda_check((expr), #expr, __FILE__, __LINE__)
 
+// Streaming-multiprocessor count of the device this process runs on, queried once and cached.
+// Launch geometry that deliberately fills exactly one resident wave reads the count from here
+// instead of transcribing a per-part literal; the product runs one resident model on one device,
+// so a single cached query is the whole device set.
+int device_sm_count();
+
+// Compile-time mirror of device_sm_count() for the architecture this build targets. __device__
+// launch policies cannot query the runtime, and the host launcher that must reproduce such a
+// policy exactly has to agree with it at compile time; those two sites use this constant, every
+// other site uses device_sm_count().
+#if defined(NINFER_SM89)
+inline constexpr int kTargetSmCount = 128; // NVIDIA GeForce RTX 4090 (sm_89)
+#else
+inline constexpr int kTargetSmCount = 170; // NVIDIA GeForce RTX 5090 (sm_120a)
+#endif
+
 // Non-owning execution facts passed to Ops whose launch policy depends on physical device
 // capacity. DeviceContext remains the owner and authoritative source of both values.
 struct DeviceExecutionView {

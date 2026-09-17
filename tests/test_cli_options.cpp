@@ -84,10 +84,27 @@ int main() {
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "k8v4"});
     failures += check(k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
                       "--kv-dtype k8v4 did not select asymmetric K8V4 KV");
+    const ninfer::cli::Options rk4v4 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "rk4v4"});
+    failures += check(rk4v4.kv_cache == ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64,
+                      "--kv-dtype rk4v4 did not select rotated int4 KV");
+    const ninfer::cli::Options rk4v4_e8 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "rk4v4-e8"});
+    failures += check(rk4v4_e8.kv_cache == ninfer::KvCacheStorage::RK4V4E8,
+                      "--kv-dtype rk4v4-e8 did not select E8-lattice int4 KV");
     const std::string help = ninfer::cli::usage_text("ninfer-cli");
     failures +=
-        check(help.find("nvfp4") != std::string::npos && help.find("k8v4") != std::string::npos,
+        check(help.find("nvfp4") != std::string::npos && help.find("k8v4") != std::string::npos &&
+                  help.find("rk4v4-e8") != std::string::npos,
               "CLI help omits a production KV storage mode");
+    const ninfer::cli::Options wddm =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--wddm-evictable-budget"});
+    failures += check(wddm.wddm_evictable_budget, "--wddm-evictable-budget did not reach options");
+    failures += check(!parse({"ninfer-cli", "model.ninfer", "--prompt", "hello"})
+                           .wddm_evictable_budget,
+                      "WDDM evictable budgeting is unexpectedly enabled by default");
+    failures += check(help.find("--wddm-evictable-budget") != std::string::npos,
+                      "CLI help omits --wddm-evictable-budget");
     const ninfer::cli::Options logging =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--log-level", "debug"});
     failures += check(logging.log_level == ninfer::product::LogLevel::Debug,

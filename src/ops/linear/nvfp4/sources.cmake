@@ -1,6 +1,5 @@
 target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/nvfp4_format.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/nvfp4_w4a4.cu"
   "${CMAKE_CURRENT_LIST_DIR}/nvfp4_dispatch.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/shapes/n14336_k5120.cu"
   "${CMAKE_CURRENT_LIST_DIR}/shapes/n16384_k5120.cu"
@@ -9,6 +8,12 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/shapes/n5120_k17408.cu"
 )
 
-target_sources(ninfer_nvfp4_non_rdc PRIVATE
-  "${CMAKE_CURRENT_LIST_DIR}/nvfp4_w4a4_tma.cu"
-)
+# W4A4 quantization feeds the Blackwell-only FP4 GEMMs; the TMA GEMM itself is warp-specialized.
+if(NINFER_OPS_SM120)
+  target_sources(ninfer_ops PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/nvfp4_w4a4.cu"
+  )
+  target_sources(ninfer_nvfp4_non_rdc PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/nvfp4_w4a4_tma.cu"
+  )
+endif()

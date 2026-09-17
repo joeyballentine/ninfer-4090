@@ -1,10 +1,20 @@
-#include "product/media_acquire/acquire.h"
+﻿#include "product/media_acquire/acquire.h"
 
+#if defined(NINFER_HAVE_LIBCURL)
 #include <curl/curl.h>
+#endif
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/socket.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -36,6 +46,7 @@ void check_control(const Policy& policy) {
     }
 }
 
+#if defined(NINFER_HAVE_LIBCURL)
 long bounded_timeout_ms(const Policy& policy, int configured) {
     if (policy.deadline == Clock::time_point{}) { return configured; }
     check_control(policy);
@@ -44,6 +55,7 @@ long bounded_timeout_ms(const Policy& policy, int configured) {
             .count();
     return std::min<long>(configured, std::max<std::int64_t>(1, remaining));
 }
+#endif
 
 std::vector<std::uint8_t> decode_base64(std::string_view text) {
     static constexpr std::array<std::int8_t, 256> table = [] {
@@ -84,11 +96,12 @@ std::vector<std::uint8_t> decode_base64(std::string_view text) {
     return out;
 }
 
+#if defined(NINFER_HAVE_LIBCURL)
 bool private_ipv4(std::uint32_t address) {
     const std::uint32_t a = ntohl(address);
     return (a >> 24U) == 0 || (a >> 24U) == 10 || (a >> 24U) == 127 || (a >> 16U) == 0xa9fe ||
            (a >> 20U) == 0xac1 || (a >> 16U) == 0xc0a8 || (a >> 22U) == 0x0191 ||
-           (a >> 17U) == 0x6309 || (a >> 24U) >= 224;
+           (a >> 17U) == 0x633f || (a >> 24U) >= 224;
 }
 
 bool private_address(const sockaddr* address) {
@@ -276,6 +289,7 @@ std::vector<std::uint8_t> fetch_url(std::string url, const Policy& policy) {
     }
     throw Error(ErrorKind::RemoteUnavailable, "too many media URL redirects");
 }
+#endif
 
 std::vector<std::uint8_t> read_path(const Source& source, const Policy& policy) {
     check_control(policy);
@@ -287,7 +301,7 @@ std::vector<std::uint8_t> read_path(const Source& source, const Policy& policy) 
     if (!policy.media_root.empty()) {
         const std::filesystem::path root = std::filesystem::weakly_canonical(policy.media_root, ec);
         const auto relative              = std::filesystem::relative(path, root, ec);
-        if (ec || relative.empty() || relative.native().starts_with("..")) {
+        if (ec || relative.empty() || relative.generic_string().starts_with("..")) {
             throw std::invalid_argument("media path is outside configured media root");
         }
     }
@@ -333,9 +347,11 @@ std::vector<std::uint8_t> acquire_bytes(const Source& source, const Policy& poli
     if (source.value.empty()) { throw std::invalid_argument("media source is empty"); }
 
     if (source.kind == SourceKind::Url) {
-        std::vector<std::uint8_t> bytes = fetch_url(source.value, policy);
-        if (bytes.empty()) { throw std::invalid_argument("media source contains no data"); }
-        return bytes;
+#if defined(NINFER_HAVE_LIBCURL)
+        return fetch_url(source.value, policy);
+#else
+        throw std::invalid_argument("ninfer compiled without curl. Remote URLs are unsupported.");
+#endif
     }
     if (source.kind == SourceKind::Data) {
         const std::size_t comma = source.value.find(',');

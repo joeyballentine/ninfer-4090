@@ -4,6 +4,7 @@
 #include "models/qwen3_5/frontend/prepared_prompt.h"
 
 #include "models/qwen3_5/frontend/chat_template.h"
+#include "models/qwen3_5/frontend/encoded_history_cache.h"
 #include "models/qwen3_5/frontend/media_cache.h"
 #include "models/qwen3_5/frontend/processor.h"
 #include "models/qwen3_5/frontend/test_access.h"
@@ -574,8 +575,13 @@ public:
         if (options.max_context == 0) {
             throw std::invalid_argument("frontend max_context must be nonzero");
         }
-        const std::uint64_t vision_tokens =
+        // The Vision workspace is sized to vision_max_tokens, so the Processor must not
+        // exceed that budget: larger media are rejected before reaching the encoder.
+        std::uint64_t vision_tokens =
             std::min<std::uint64_t>(options.max_context, kMaximumPromptVisionTokens);
+        if (options.vision_max_tokens > 0) {
+            vision_tokens = std::min<std::uint64_t>(vision_tokens, options.vision_max_tokens);
+        }
         processor.max_vision_tokens = vision_tokens;
         processor.max_raw_patches   = vision_tokens * kRawPatchesPerVisionToken;
         if (vision_enabled) {
@@ -713,7 +719,8 @@ const PreparedPromptData& FrontendTestAccess::inspect(const PreparedPrompt& prom
     return PreparedPromptAccess::view(prompt);
 }
 
-PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& control) const {
+PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& control,
+                                 fi::EncodedHistoryCache* cache) const {
     fi::check_preparation_control(control);
     const auto start              = Clock::now();
     const PromptOptions options   = input.options;
@@ -754,6 +761,7 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
     std::vector<std::optional<std::uint32_t>> message_boundaries;
     std::vector<std::optional<std::uint32_t>> cache_boundaries;
     if (has_media) {
+        if (cache != nullptr) { fi::last_host_encode_observation = {}; }
         fi::Processor processor(*impl_->tokenizer, impl_->chat_template, impl_->processor,
                                 impl_->media_cache);
         fi::ProcessedInput processed;
@@ -793,12 +801,22 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
         message_boundaries = std::move(processed.message_boundaries);
         cache_boundaries   = std::move(processed.cache_boundaries);
     } else {
-        const fi::RenderedChat rendered = impl_->chat_template.render(
-            messages, render_options(options, rendered_markers), control);
-        result.starts_in_reasoning  = rendered.starts_in_reasoning;
         const auto tokenize_started = Clock::now();
-        fi::EncodedChat encoded     = fi::encode_rendered_chat(
-            *impl_->tokenizer, rendered, static_cast<std::size_t>(impl_->max_context) + 1U);
+        fi::EncodedChat encoded;
+        if (cache != nullptr) {
+            fi::CachedEncodedChat cached = fi::encode_chat_with_cache(
+                *impl_->tokenizer, impl_->chat_template, messages,
+                render_options(options, rendered_markers), control, *cache,
+                static_cast<std::size_t>(impl_->max_context) + 1U);
+            result.starts_in_reasoning = cached.starts_in_reasoning;
+            encoded                    = std::move(cached.chat);
+        } else {
+            const fi::RenderedChat rendered = impl_->chat_template.render(
+                messages, render_options(options, rendered_markers), control);
+            result.starts_in_reasoning = rendered.starts_in_reasoning;
+            encoded                    = fi::encode_rendered_chat(
+                *impl_->tokenizer, rendered, static_cast<std::size_t>(impl_->max_context) + 1U);
+        }
         result.prepare.tokenize_seconds =
             std::chrono::duration<double>(Clock::now() - tokenize_started).count();
         fi::check_preparation_control(control, "tokenization");
@@ -823,7 +841,8 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
     return PreparedPrompt(std::move(prepared));
 }
 
-std::uint32_t Frontend::count_tokens(PromptInput input, const PreparationControl& control) const {
+std::uint32_t Frontend::count_tokens(PromptInput input, const PreparationControl& control,
+                                     fi::EncodedHistoryCache* cache) const {
     fi::check_preparation_control(control);
     const PromptOptions options           = input.options;
     std::vector<fi::ChatMessage> messages = convert_messages(std::move(input.messages));
@@ -834,14 +853,23 @@ std::uint32_t Frontend::count_tokens(PromptInput input, const PreparationControl
         throw std::invalid_argument("Vision is disabled for this Engine");
     }
     if (!has_media) {
-        const fi::RenderedChat rendered =
-            impl_->chat_template.render(messages, render_options(options), control);
-        const std::uint32_t count = checked_token_count(
-            fi::encode_rendered_chat(*impl_->tokenizer, rendered).input_ids.size());
+        std::uint32_t count = 0;
+        if (cache != nullptr) {
+            count = checked_token_count(
+                fi::encode_chat_with_cache(*impl_->tokenizer, impl_->chat_template, messages,
+                                           render_options(options), control, *cache)
+                    .chat.input_ids.size());
+        } else {
+            const fi::RenderedChat rendered =
+                impl_->chat_template.render(messages, render_options(options), control);
+            count = checked_token_count(
+                fi::encode_rendered_chat(*impl_->tokenizer, rendered).input_ids.size());
+        }
         fi::check_preparation_control(control, "tokenization");
         return count;
     }
 
+    if (cache != nullptr) { fi::last_host_encode_observation = {}; }
     fi::Processor processor(*impl_->tokenizer, impl_->chat_template, impl_->processor,
                             impl_->media_cache);
     try {

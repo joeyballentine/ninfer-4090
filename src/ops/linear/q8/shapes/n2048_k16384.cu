@@ -44,9 +44,18 @@ Q8Launch select_q8_n2048_k16384(std::int32_t tokens) {
     if (tokens <= 48) return launch_q8_ksplit<Geometry, 48, C48>;
     if (tokens <= 56) return launch_q8_ksplit<Geometry, 56, C56>;
     if (tokens <= 64) return launch_q8_ksplit<Geometry, 64, C64>;
+#if defined(NINFER_SM89)
+    // The grouped kernel stages KSplits * (1024 + 128 * Capacity) bytes; at this K the measured
+    // K-split counts overrun the 48 KiB sm_89 block limit. Halving them keeps each token tile and
+    // its group width, and the CTA covers the same K with twice the iterations per warp.
+    if (tokens <= 80) return launch_grouped<80, 4, 2>;
+    if (tokens <= 96) return launch_grouped<96, 2, 6>;
+    if (tokens <= 128) return launch_grouped<128, 2, 8>;
+#else
     if (tokens <= 80) return launch_grouped<80, 8, 2>;
     if (tokens <= 96) return launch_grouped<96, 4, 6>;
     if (tokens <= 128) return launch_grouped<128, 4, 8>;
+#endif
 
     // Broad throughput regions; each selected MMA handles its own complete and partial tiles.
     if (tokens <= 384) return launch_q8_mma_r32_c64;

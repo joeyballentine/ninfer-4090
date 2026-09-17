@@ -25,12 +25,72 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
         cudaFuncSetAttribute(causal_attention_prompt_bf16_kernel<Geometry, Metadata>,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptSmemBytes);
     CUDA_CHECK(attr_bf16);
+#if !defined(NINFER_SM89)
     static const cudaError_t attr_i8 =
         cudaFuncSetAttribute(causal_attention_prompt_i8_kernel<Geometry, Metadata>,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptI8SmemBytes);
     CUDA_CHECK(attr_i8);
+#endif
 
     const auto tokens = static_cast<std::int32_t>(q.ne[2]);
+#if defined(NINFER_SM89)
+    // Kernel i8 del fork sergiuszm/ninfer-4090 (modos packed int4 / E8).
+    if (cache.storage == KvCacheStorage::RK4V4E8 ||
+        cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
+        cache.storage == KvCacheStorage::Int8Group64) {
+        const dim3 attention_grid(static_cast<unsigned>(div_up(tokens, kCausalPromptI8Br)),
+                                  static_cast<unsigned>(Geometry::QHeads), 1u);
+        const Tensor& cache_k_scale = cache.k_scale_pages;
+        const Tensor& cache_v_scale = cache.v_scale_pages;
+        const auto launch_i8 = [&]<bool PackedV, bool RotateK, bool RotateV, bool PackedK,
+                                   bool E8Root>() {
+            static const cudaError_t attr_i8 = cudaFuncSetAttribute(
+                causal_attention_prompt_i8_kernel<Geometry, PackedV, RotateK, RotateV, PackedK,
+                                                  E8Root, Metadata>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptI8SmemBytes);
+            CUDA_CHECK(attr_i8);
+            causal_attention_prompt_i8_kernel<Geometry, PackedV, RotateK, RotateV, PackedK,
+                                              E8Root, Metadata>
+                <<<attention_grid, kCausalPromptI8Threads, kCausalPromptI8SmemBytes, stream>>>(
+                    static_cast<const __nv_bfloat16*>(q.data),
+                    static_cast<const std::int8_t*>(cache_k.data),
+                    static_cast<const std::uint8_t*>(cache_v.data),
+                    static_cast<const __half*>(cache_k_scale.data),
+                    static_cast<const __half*>(cache_v_scale.data), metadata,
+                    static_cast<const std::int32_t*>(positions.data), scale,
+                    static_cast<__nv_bfloat16*>(out.data), tokens);
+        };
+        // rk4v4 y rk4v4-e8 comparten la misma instancia de carga (K i4, V i4, rotaciones);
+        // la reticula E8 solo interviene al codificar (append), no al leer.
+        if (cache.storage == KvCacheStorage::RK4V4E8 ||
+            cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64) {
+            launch_i8.template operator()<true, true, true, true, false>();
+        } else {
+            launch_i8.template operator()<false, false, false, false, false>();
+        }
+    } else {
+        const dim3 attention_grid(static_cast<unsigned>(div_up(tokens, kCausalPromptBr)),
+                                  static_cast<unsigned>(Geometry::QHeads), 1u);
+        causal_attention_prompt_bf16_kernel<Geometry, Metadata>
+            <<<attention_grid, kCausalPromptThreads, kCausalPromptSmemBytes, stream>>>(
+                static_cast<const __nv_bfloat16*>(q.data),
+                static_cast<const __nv_bfloat16*>(cache_k.data),
+                static_cast<const __half*>(cache_v.data), metadata,
+                static_cast<const std::int32_t*>(positions.data), scale,
+                static_cast<__nv_bfloat16*>(out.data), tokens);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    // Los modos con V rotada (rk4v4 / rk4v4-e8) devuelven el PV al espacio original
+    // con la inversa de la rotacion H64 (self-inverse).
+    if (cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
+        cache.storage == KvCacheStorage::RK4V4E8) {
+        kv_cache_inverse_rotate_output_kernel<Geometry::QHeads>
+            <<<tokens * Geometry::QHeads * kKVCacheInt8Groups, 32, 0, stream>>>(
+                static_cast<__nv_bfloat16*>(out.data), tokens, tokens, 0, nullptr);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+#else
     if (cache.storage == KvCacheStorage::Int8Group64) {
         const dim3 attention_grid(static_cast<unsigned>(div_up(tokens, kCausalPromptI8Br)),
                                   static_cast<unsigned>(Geometry::QHeads), 1u);
@@ -58,6 +118,7 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
     }
     CUDA_CHECK(cudaGetLastError());
 }
+#endif
 
 } // namespace
 

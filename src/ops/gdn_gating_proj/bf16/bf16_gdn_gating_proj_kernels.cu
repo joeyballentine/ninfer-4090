@@ -357,8 +357,31 @@ bool launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
     } else {
         constexpr std::int64_t kCtasPerTokenTile =
             static_cast<std::int64_t>(Geometry::kHeads / kBf16GdnBlockM) * SplitK;
-        constexpr std::int32_t kResidentCtasPerSm =
+        constexpr std::int32_t kTunedResidentCtasPerSm =
             cooperative_resident_ctas_per_sm<Geometry, SplitK>();
+        // Ada (sm_89) codegen is sparser than the sm_120a facts above: 512-thread splits can
+        // exceed the 64K per-SM register file and admit one resident CTA. Clamp against the
+        // driver's true occupancy so the cooperative grid never exceeds SMs * maxBlocksPerSM
+        // (larger problems fall into the chunked path below, which needs no cross-tile reduction).
+        static const std::int32_t kResidentCtasPerSm = [kTunedResidentCtasPerSm] {
+            int full_blocks       = 0;
+            int predicated_blocks = 0;
+            (void)cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                &full_blocks,
+                (const void*)bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, true, Warps,
+                                                                  NormalizeInput,
+                                                                  NormTokenCapacity>,
+                Warps * 32, kSmemBytes);
+            (void)cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                &predicated_blocks,
+                (const void*)bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, false, Warps,
+                                                                  NormalizeInput,
+                                                                  NormTokenCapacity>,
+                Warps * 32, kSmemBytes);
+            const int minimum = std::min(full_blocks, predicated_blocks);
+            return minimum > 0 ? std::min(kTunedResidentCtasPerSm, minimum)
+                               : kTunedResidentCtasPerSm;
+        }();
         const std::int64_t resident_ctas =
             static_cast<std::int64_t>(multiprocessor_count) * kResidentCtasPerSm;
         const std::int64_t max_token_tiles = resident_ctas / kCtasPerTokenTile;

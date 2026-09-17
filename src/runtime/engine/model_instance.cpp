@@ -1,6 +1,7 @@
 #include "runtime/engine/model_instance.h"
 #include "artifact/reader.h"
 #include "artifact/formats.h"
+#include "core/arena.h"
 #include "core/startup.h"
 #include "models/qwen3_5/load.h"
 #include "models/qwen3_5/measurement.h"
@@ -59,10 +60,28 @@ void validate_options(const EngineOptions& options) {
     }
 }
 
-std::size_t current_free_device_bytes() {
+// Runtime memory budget. `weights_bytes` and `wddm_evictable_budget` are only consulted on
+// Windows: with --wddm-evictable-budget the runtime budgets against physical device capacity
+// minus the resident weights and a 512 MiB non-evictable DWM display floor, letting WDDM evict
+// background applications, instead of the far smaller WDDM process budget cudaMemGetInfo
+// reports. It is opt-in because on a GPU that also drives the desktop those background
+// allocations are frequently not evictable, and budgeting against total VRAM then
+// oversubscribes the device and pushes the runtime into WDDM paging.
+std::size_t current_free_device_bytes(std::size_t weights_bytes  = 0,
+                                      bool wddm_evictable_budget = false) {
     std::size_t free_bytes  = 0;
     std::size_t total_bytes = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+#if defined(_WIN32)
+    constexpr std::size_t kMinDwmHeadroom = 512ULL * 1024ULL * 1024ULL;
+    if (wddm_evictable_budget && weights_bytes > 0 &&
+        total_bytes > weights_bytes + kMinDwmHeadroom) {
+        return std::max(free_bytes, total_bytes - weights_bytes - kMinDwmHeadroom);
+    }
+#else
+    (void)weights_bytes;
+    (void)wddm_evictable_budget;
+#endif
     return free_bytes;
 }
 
@@ -148,13 +167,17 @@ ModelInstance::ModelInstance(std::unique_ptr<models::qwen3_5::Model> source,
                                .max_context              = options.max_context,
                                .media_cache_bytes        = options.media_cache_bytes,
                                .media_live_bytes         = options.media_live_bytes,
-                               .media_preprocess_threads = options.media_preprocess_threads})),
+                               .media_preprocess_threads = options.media_preprocess_threads,
+                               .vision_max_tokens        = options.vision_max_tokens})),
       capacity(options.max_context) {}
 
 ModelInstance::~ModelInstance() = default;
 
 ConstructedModel construct_model(const EngineOptions& options, DeviceContext& device) {
     validate_options(options);
+#if defined(_WIN32)
+    core::set_wddm_residency_lock_enabled(options.wddm_evictable_budget);
+#endif
     const auto start = Clock::now();
     StartupPhaseScope inspect(options.startup_observer, StartupPhase::ArtifactInspect);
     artifact::Reader reader(options.artifact_path);
@@ -175,10 +198,12 @@ ConstructedModel construct_model(const EngineOptions& options, DeviceContext& de
                 context_cost_hardware_class(device.props.name, device.props.major, device.props.minor),
             .prefill_signature = signature},
         options.context_cost.preset_path);
-    auto planner    = models::qwen3_5::make_sequence_planner(instance->parameters, device, options);
-    auto resolution = resolve_kv_capacity(options.kv_capacity, planner.capacity_curve(),
-                                          current_free_device_bytes());
-    auto sequence   = std::move(planner).finalize(resolution.main_page_groups);
+    auto planner = models::qwen3_5::make_sequence_planner(instance->parameters, device, options);
+    auto resolution =
+        resolve_kv_capacity(options.kv_capacity, planner.capacity_curve(),
+                            current_free_device_bytes(instance->model->storage_stats().h2d_bytes,
+                                                      options.wddm_evictable_budget));
+    auto sequence = std::move(planner).finalize(resolution.main_page_groups);
     if (sequence.device_reservation_bytes() != resolution.runtime_reservation_bytes ||
         sequence.kv_capacity() != resolution.resolved_tokens) {
         throw std::logic_error("resolved KV capacity does not match the finalized Program plan");

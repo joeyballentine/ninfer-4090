@@ -118,7 +118,13 @@ void q8_dflash2_linear_swiglu_mma_r64_c80_k128_launch(const Tensor& x, const Wei
 
 void q8_dflash2_linear_swiglu_mma_r64_c96_k128_launch(const Tensor& x, const Weight& w, Tensor& out,
                                                       cudaStream_t stream) {
+#if defined(NINFER_SM89)
+    // sm_89: the BK=128/ACT=1 staging layout (50176 B) exceeds the 48 KiB static shared memory
+    // limit; BK=64 halves the activation staging (25600 B) with the same math.
+    using Schedule = Q8RowSplitMmaGemmSchedule<64, 96, 64, 8, 2, 2, 64, 1>;
+#else
     using Schedule = Q8RowSplitMmaGemmSchedule<64, 96, 64, 8, 2, 2, 128, 1>;
+#endif
     launch_route<Schedule>(x, w, out, stream);
 }
 

@@ -215,6 +215,9 @@ int run_nvfp4() {
     int failures = 0;
     failures += run_nvfp4_case(parent, 1, ops::LinearPolicy::A16Only);
     failures += run_nvfp4_case(parent, 4, ops::LinearPolicy::AllowA8);
+#if !defined(NINFER_SM89)
+    // NVFP4 W4A4 needs the Blackwell FP4 MMA; sm_89 builds compile the stub instead,
+    // which rejects the route at runtime (see src/ops/nvfp4_w4a4_stubs.cpp).
     failures += run_nvfp4_case(parent, 1, ops::LinearPolicy::AllowA4);
     failures += run_nvfp4_case(parent, 2, ops::LinearPolicy::AllowA4);
     failures += run_nvfp4_case(parent, 17, ops::LinearPolicy::AllowA4);
@@ -224,6 +227,7 @@ int run_nvfp4() {
     failures += run_nvfp4_case(parent, 1023, ops::LinearPolicy::AllowA4);
     failures += run_nvfp4_case(parent, 1024, ops::LinearPolicy::AllowA4);
     failures += run_nvfp4_case(parent, 1025, ops::LinearPolicy::AllowA4);
+#endif
     return failures;
 }
 

@@ -131,6 +131,10 @@ const char* kv_cache_name(ninfer::KvCacheStorage storage) noexcept {
         return "nvfp4";
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
         return "k8v4";
+    case ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+        return "rk4v4";
+    case ninfer::KvCacheStorage::RK4V4E8:
+        return "rk4v4-e8";
     }
     return "unknown";
 }
@@ -297,6 +301,16 @@ std::optional<OperationalRecord> render_tool_call_fallback(const RequestLogConte
     if (!outcome.tool_call_parse.marker_seen ||
         reason == ninfer::ToolCallParseFallbackReason::None) {
         return std::nullopt;
+    }
+    // Tolerant recovery retained structured calls after discarding a trailing suffix; that is a
+    // successful parse, not a fallback. Note it as informational transparency.
+    if (reason == ninfer::ToolCallParseFallbackReason::TruncatedTail) {
+        return OperationalRecord{
+            .severity = OperationalSeverity::Info,
+            .message  = "req#" + std::to_string(context.id) +
+                        " tolerated tool-call suffix discarded | " +
+                        pretty_code(ninfer::tool_call_parse_fallback_reason_name(reason)),
+        };
     }
     return OperationalRecord{
         .severity = OperationalSeverity::Warning,

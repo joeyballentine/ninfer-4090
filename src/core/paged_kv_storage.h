@@ -87,6 +87,12 @@ struct PagedKVStorageLayout {
                     {DType::U8, 128, DType::U8, 16}};
         }
         break;
+    case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+    case KvCacheStorage::RK4V4E8:
+        // K y V: 256 dims int4 = 128 bytes U8 por vector; escala FP16 por grupo-64 (4/vector).
+        // (La retícula E8 solo cambia cómo se eligen los códigos, no el layout físico.)
+        if (head_dim == kD256KVCacheHeadDim) { return symmetric({DType::U8, 128, DType::FP16, 4}); }
+        break;
     }
     throw std::invalid_argument("unsupported paged KV-cache storage geometry");
 }

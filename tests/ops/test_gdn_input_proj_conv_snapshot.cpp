@@ -787,6 +787,8 @@ int run_nvfp4() {
 
     int failures = 0;
     failures += run_nvfp4_case(parent, 1, ops::LinearPolicy::A16Only, 2);
+#if !defined(NINFER_SM89)
+    // AllowA4 (W4A4) on NVFP4: kernels are SM120 (Blackwell) only upstream.
     failures += run_nvfp4_case(parent, 3, ops::LinearPolicy::AllowA4, 4);
     failures += run_nvfp4_case(parent, 4, ops::LinearPolicy::AllowA4, 5);
     failures += run_nvfp4_case(parent, 17, ops::LinearPolicy::AllowA4, 0);
@@ -820,6 +822,7 @@ int run_nvfp4() {
                                               snapshot_base, q, k, v, z, ops::LinearPolicy::AllowA4,
                                               workspace, nullptr);
         });
+#endif
     failures += parent.verify_preserved("batched NVFP4 parent weight");
     return failures;
 }

@@ -212,11 +212,13 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--max-new N` | requested output-token limit | `128` |
 | `--device N` | CUDA device index | `0` |
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
+| `--kv-dtype rk4v4\|rk4v4-e8` | rotated 4-bit keys and 4-bit values; `rk4v4-e8` projects the rotated keys onto the E8 Conway-Sloane lattice; sm_89 builds only | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
+| `--wddm-evictable-budget` | budget runtime memory against total VRAM instead of the WDDM process budget (Windows only) | off |
 | `--chat-template FILE` | use a local Jinja template | artifact template |
 | `--no-thinking` | disable thinking | template default |
 | `--thinking-budget N` | positive model-origin thinking-token cap; omitted means unlimited | unset |
@@ -256,7 +258,11 @@ Run `./build/apps/ninfer --help` for the exact option contract.
 The official artifacts have a native context limit of 262,144 tokens. The practical allocation
 on one RTX 5090 depends on the selected artifact, media workload, output budget, and KV-cache type.
 The artifact describes its model configuration and weight representations;
-`--kv-dtype` independently selects runtime KV storage. The prepared prompt must fit
+`--kv-dtype` independently selects runtime KV storage. `rk4v4` stores Hadamard-rotated 4-bit keys
+and 4-bit values with one FP16 scale per group of 64 dimensions; `rk4v4-e8` keeps that layout and
+additionally projects the rotated keys onto the E8 Conway-Sloane lattice. Only the sm_89 attention
+and KV kernels implement the two packed int4 modes, so startup planning rejects them on any other
+compute capability. The prepared prompt must fit
 `--max-context`; generation stops at the remaining context capacity when necessary.
 `--kv-capacity N` controls the shared physical Main Text KV pool independently and is rounded up to
 the 64-token page size. `--kv-capacity auto` loads the selected weights, measures the remaining GPU

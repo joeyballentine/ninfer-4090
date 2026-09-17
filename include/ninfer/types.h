@@ -33,6 +33,11 @@ enum class KvCacheStorage : std::uint8_t {
     Fp8E4M3Row256,
     Nvfp4Group16,
     Fp8KeyNvfp4Value,
+    // Fork-local (port desde sergiuszm/ninfer-4090, línea udps): K y V en int4 (dos códigos
+    // por byte) con rotación H64 por grupo-64 antes de codificar; RK4V4E8 proyecta además K
+    // a la retícula E8 (Conway-Sloane) en el dominio rotado. Planes U8 + escalas FP16/64.
+    RotatedInt4KeyInt4ValueGroup64,
+    RK4V4E8,
 };
 
 enum class EnginePurpose : std::uint8_t {
@@ -166,7 +171,13 @@ struct EngineOptions {
     // Zero selects a bounded worker count from the detected host concurrency.
     std::uint32_t media_preprocess_threads = 0;
     bool enable_vision                     = false;
+    // Tope de tokens del scratchpad de visión (el frontend rechaza medios mayores).
+    std::uint32_t vision_max_tokens        = 8192;
     bool use_cuda_graph                    = true;
+    // Opt-in aggressive WDDM memory budgeting against total VRAM on dedicated GPUs (Windows
+    // only): budgets runtime capacity from physical device capacity minus static weights and a
+    // minimum eviction floor, instead of the WDDM process budget reported by cudaMemGetInfo.
+    bool wddm_evictable_budget             = false;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;
@@ -258,6 +269,7 @@ struct OutputOptions {
     // Presentation constraint supplied by the protocol adapter. It bounds only Qwen's emitted
     // function-name grammar; it does not require the name to match a currently declared tool.
     std::uint32_t tool_name_max_length = 128;
+    bool tolerant_tool_calls = false;
 };
 
 struct RequestOptions {
@@ -306,6 +318,10 @@ enum class ToolCallParseFallbackReason : std::uint8_t {
     InvalidToolName,
     UndeclaredTool,
     TrailingContent,
+    // Tolerant recovery discarded a trailing suffix that followed an otherwise complete call.
+    // A structured response was still produced, so this is surfaced for transparency rather than
+    // treated as a fallback-to-text failure.
+    TruncatedTail,
 };
 
 [[nodiscard]] inline constexpr const char*
@@ -323,6 +339,8 @@ tool_call_parse_fallback_reason_name(ToolCallParseFallbackReason reason) noexcep
         return "undeclared_tool";
     case ToolCallParseFallbackReason::TrailingContent:
         return "trailing_content";
+    case ToolCallParseFallbackReason::TruncatedTail:
+        return "truncated_tail";
     }
     return "malformed_structure";
 }

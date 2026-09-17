@@ -25,7 +25,14 @@ struct FrontendOptions {
     std::size_t media_cache_bytes          = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes           = kDefaultMediaLiveBytes;
     std::uint32_t media_preprocess_threads = 0;
+    // Vision scratchpad token budget. The Frontend rejects media above it, and the Program
+    // sizes the Vision workspace to it. Zero keeps the architectural maximum.
+    std::uint32_t vision_max_tokens = 0;
 };
+
+namespace frontend {
+class EncodedHistoryCache;
+} // namespace frontend
 
 struct FrontendResources;
 struct PreparedPromptData;
@@ -64,10 +71,13 @@ public:
     Frontend& operator=(Frontend&&) noexcept;
     ~Frontend();
 
-    [[nodiscard]] PreparedPrompt prepare(PromptInput input,
-                                         const PreparationControl& control = {}) const;
+    // `cache` is the Engine-owned incremental host-encode cache. When present, a text-only
+    // continuation prompt re-encodes only the suffix appended to the committed history.
+    [[nodiscard]] PreparedPrompt prepare(PromptInput input, const PreparationControl& control = {},
+                                         frontend::EncodedHistoryCache* cache = nullptr) const;
     [[nodiscard]] std::uint32_t count_tokens(PromptInput input,
-                                             const PreparationControl& control = {}) const;
+                                             const PreparationControl& control    = {},
+                                             frontend::EncodedHistoryCache* cache = nullptr) const;
     [[nodiscard]] PreparedPrompt prepare_tokens(std::vector<TokenId> token_ids,
                                                 bool allow_prefix_identity = true) const;
     [[nodiscard]] std::vector<TokenId> tokenize_text(std::string_view text) const;

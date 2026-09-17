@@ -718,8 +718,13 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                   out.dflash_context, out.dflash_round, out.causal_score});
     out.capacity = out.general_capacity;
     if (plan.features.vision) {
-        const std::uint32_t merged = static_cast<std::uint32_t>(
-            std::min<std::uint64_t>(plan.capacity, kMaximumVisionItemTokens));
+        // The Vision workspace only covers the configured vision-token budget; the Frontend
+        // rejects larger media before they reach the encoder.
+        const std::uint64_t frontend_limit = plan.vision_max_tokens > 0
+                                                 ? std::uint64_t{plan.vision_max_tokens}
+                                                 : kMaximumVisionItemTokens;
+        const std::uint32_t merged         = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            std::min<std::uint64_t>(plan.capacity, kMaximumVisionItemTokens), frontend_limit));
         out.vision = execution::VisionContext::plan_workspace(
             *parameters.model.config().vision, *parameters.vision, merged, out.general_capacity);
         out.capacity = std::max(out.capacity, out.vision->capacity_bytes);
@@ -729,6 +734,14 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
 
 void validate_target_options(const execution::Parameters& parameters, DeviceContext& device,
                              const EngineOptions& options) {
+    // The packed int4 modes (rk4v4, rk4v4-e8) exist only in the sm_89 i8 attention kernels;
+    // on any other architecture startup fails before any device memory is reserved.
+    if ((options.kv_cache == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
+         options.kv_cache == KvCacheStorage::RK4V4E8) &&
+        device.compute_capability() != 89) {
+        throw std::invalid_argument(
+            "kv-dtype rk4v4/rk4v4-e8 requires compute capability 8.9 (RTX 4090 build)");
+    }
     if (!parameters.model.config().text.attention ||
         parameters.model.config().text.full_attention_layers == 0) {
         throw std::invalid_argument("Qwen3.5 Program requires at least one full-attention layer");
@@ -801,8 +814,9 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         }
         break;
     }
-    if (device.compute_capability() != 120) {
-        throw std::invalid_argument("Qwen3.5 family runtime requires compute capability 12.0");
+    if (device.compute_capability() != 120 && device.compute_capability() != 89) {
+        throw std::invalid_argument(
+            "Qwen3.5 family runtime requires compute capability 12.0 or 8.9");
     }
 }
 
@@ -823,6 +837,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->draft_window        = inputs.draft_window;
     impl->speculative_backend = inputs.speculative_backend;
     impl->proposal_head       = inputs.proposal_head;
+    impl->vision_max_tokens   = inputs.vision_max_tokens;
     impl->features            = inputs.features;
     impl->use_cuda_graph      = inputs.use_cuda_graph;
     impl->causal_scoring      = inputs.causal_scoring;
@@ -894,6 +909,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .speculative_backend = options.speculative.backend,
         .kv_storage          = options.kv_cache,
         .proposal_head       = options.speculative.proposal_head,
+        .vision_max_tokens   = options.vision_max_tokens,
         .features            = models::load_options(options),
         .use_cuda_graph      = options.use_cuda_graph,
         .causal_scoring      = options.purpose == EnginePurpose::CausalScoring,

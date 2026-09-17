@@ -46,11 +46,18 @@ struct ServeOptions {
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;
-    bool enable_vision      = false;
-    bool use_cuda_graph     = true;
-    bool allow_prefix_reuse = true;
+    bool enable_vision              = false;
+    std::uint32_t vision_max_tokens = 8192;
+    bool use_cuda_graph             = true;
+    // Opt-in aggressive WDDM memory budgeting against total VRAM on dedicated GPUs. Windows
+    // only: the runtime planner budgets from physical device capacity instead of the WDDM
+    // process budget reported by cudaMemGetInfo.
+    bool wddm_evictable_budget = false;
+    bool allow_prefix_reuse    = true;
     std::optional<bool> enable_thinking;
     std::optional<bool> preserve_thinking;
+    bool tolerant_tool_calls =
+        false; // recover complete Qwen calls with malformed wrapper/suffix output
     std::optional<std::uint32_t> default_thinking_budget;
     int default_max_tokens = kDefaultMaxTokens;
     bool enable_cors       = false; // send permissive CORS headers for browser UIs

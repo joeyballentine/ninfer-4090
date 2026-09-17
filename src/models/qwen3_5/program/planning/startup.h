@@ -78,6 +78,8 @@ struct SequencePlanningInputs {
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
+    // Vision scratchpad token budget. Zero keeps the architectural maximum.
+    std::uint32_t vision_max_tokens = 0;
     models::LoadOptions features;
     bool use_cuda_graph = true;
     bool causal_scoring = false;
@@ -100,6 +102,8 @@ struct SequencePlanImpl {
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
+    // Vision scratchpad token budget. Zero keeps the architectural maximum.
+    std::uint32_t vision_max_tokens = 0;
     models::LoadOptions features;
     bool use_cuda_graph = true;
     bool causal_scoring = false;

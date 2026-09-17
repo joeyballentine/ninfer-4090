@@ -3,6 +3,7 @@
 #include "core/device.h"
 #include "core/nvtx.h"
 #include "core/startup.h"
+#include "models/qwen3_5/frontend/encoded_history_cache.h"
 #include "runtime/contract/sampling.h"
 #include "runtime/contract/request.h"
 #include "runtime/engine/causal_score_core.h"
@@ -183,6 +184,9 @@ public:
     LoadSummary load;
     ModelSamplingDefaults sampling_defaults;
     Core core;
+    // Incremental host-encode cache of committed chat-history prefixes. Engine-owned because
+    // the Frontend is immutable and shared between requests; only prepare/count_tokens use it.
+    mutable models::qwen3_5::frontend::EncodedHistoryCache host_encode_cache;
 };
 
 Engine::Engine(EngineOptions options) {
@@ -199,7 +203,8 @@ Engine& Engine::operator=(Engine&&) noexcept = default;
 PreparedPrompt Engine::prepare(PromptInput input, const PreparationControl& control) const {
     nvtx::ScopedRange prepare_range(nvtx::Name::FrontendPrepare, nvtx::Category::Runtime);
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    auto prepared      = impl_->active->frontend.prepare(std::move(input), control);
+    auto prepared =
+        impl_->active->frontend.prepare(std::move(input), control, &impl_->host_encode_cache);
     PromptSummary info = prepared.summary();
     const SamplingMode sampling_mode =
         info.starts_in_reasoning ? SamplingMode::Thinking : SamplingMode::NonThinking;
@@ -269,7 +274,8 @@ std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32
 
 std::uint32_t Engine::count_tokens(PromptInput input, const PreparationControl& control) const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    return impl_->active->frontend.count_tokens(std::move(input), control);
+    return impl_->active->frontend.count_tokens(std::move(input), control,
+                                                &impl_->host_encode_cache);
 }
 
 ModelSamplingDefaults Engine::sampling_defaults() const {

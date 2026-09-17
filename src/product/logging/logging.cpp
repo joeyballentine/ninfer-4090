@@ -1,11 +1,19 @@
-#include "product/logging/logging.h"
+﻿#include "product/logging/logging.h"
 
 #include <spdlog/formatter.h>
 #include <spdlog/logger.h>
 #include <spdlog/sinks/sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
+#ifdef _WIN32
+#include <io.h>
+#define isatty _isatty
+#define fileno _fileno
+#define STDERR_FILENO _fileno(stderr)
+#define localtime_r(t, tm) localtime_s((tm), (t))   // MSVC: mismo que POSIX pero con args invertidos
+#else
 #include <unistd.h>
+#endif
 
 #include <atomic>
 #include <chrono>
