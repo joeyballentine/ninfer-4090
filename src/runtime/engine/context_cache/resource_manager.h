@@ -1132,7 +1132,10 @@ public:
         out.prompt_cache_spill_requests = context_stats_.prompt_cache_spill_requests;
         if (disk_tier_ != nullptr) {
             const ContextDiskTierStats disk   = disk_tier_->stats();
-            out.prompt_cache_restore_failures = disk.restore_failures;
+            // A restore the Program then declined to adopt is a failed restore from the
+            // request's side: the I/O happened and nothing came of it.
+            out.prompt_cache_restore_failures =
+                disk.restore_failures + context_stats_.prompt_cache_restore_failures;
             out.prompt_cache_restored_bytes   = disk.restored_bytes;
             out.prompt_cache_spills           = disk.spills_published;
             out.prompt_cache_spills_dropped   = disk.spills_dropped;
@@ -1717,7 +1720,10 @@ private:
 
         std::optional<std::pair<ContinuationHandle, ContinuationSummary>> adopted =
             disk_.adopt(*record);
-        if (!adopted) { return false; }
+        if (!adopted) {
+            saturating_increment(context_stats_.prompt_cache_restore_failures);
+            return false;
+        }
         if (!valid_continuation_summary(adopted->second)) {
             (void)adopted;
             throw std::logic_error("disk tier adoption returned an invalid continuation summary");

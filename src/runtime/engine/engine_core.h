@@ -108,10 +108,23 @@ public:
                             CheckpointRef checkpoint) {
                             return program->prepare_prompt_cache_capture(owner, checkpoint);
                         },
-                    // The lookup hook stays unset: turning a restored record back into a
-                    // continuation needs a Program transaction that does not exist yet, and
-                    // reading a record nothing can adopt would spend I/O for nothing.
-                    .adopt = {},
+                    // Hook (b)'s other half: the tier has read the record into pinned Host
+                    // memory, and this turns it into a catalogued continuation. The record
+                    // argument is not passed on - the Program adopts the restore its own port
+                    // just completed, which is the only one it could place.
+                    .adopt = [program = instance_.program.get()](const DiskRecordDescriptor& record)
+                        -> std::optional<std::pair<typename ModelContract::ContinuationHandle,
+                                                   typename ModelContract::ContinuationSummary>> {
+                        (void)record;
+                        typename ModelContract::PromptCacheAdoptionResult adopted =
+                            program->adopt_prompt_cache_record();
+                        if (adopted.status != ModelContract::PromptCacheAdoption::Adopted ||
+                            !adopted.continuation) {
+                            return std::nullopt;
+                        }
+                        return std::make_pair(std::move(*adopted.continuation),
+                                              std::move(adopted.summary));
+                    },
                 });
         }
         std::promise<void> startup;
