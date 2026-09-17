@@ -447,6 +447,18 @@ public:
                page.source_pins != std::numeric_limits<std::uint32_t>::max();
     }
 
+    // A source pin that protects the Host replica rather than the Device one. The persistent
+    // prompt cache reads a checkpoint's bytes straight out of pinned Host memory on an I/O
+    // thread, so it needs a page that still has a current Host replica but may already have lost
+    // its Device replica to pressure - exactly the page `can_pin_source` rejects.
+    [[nodiscard]] bool can_pin_host_source(LogicalKVPageHandle handle) const noexcept {
+        if (!valid(handle)) { return false; }
+        const Page& page = pages_[handle.index_];
+        return host_replica_current(handle) && page.writer_references == 0 &&
+               !page.destination_pinned &&
+               page.source_pins != std::numeric_limits<std::uint32_t>::max();
+    }
+
     [[nodiscard]] bool can_pin_active_source(LogicalKVPageHandle handle) const noexcept {
         if (!valid(handle)) { return false; }
         const Page& page = pages_[handle.index_];

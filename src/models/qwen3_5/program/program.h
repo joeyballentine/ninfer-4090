@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ninfer/types.h"
+#include "runtime/contract/context_disk.h"
 #include "runtime/contract/execution.h"
 #include "runtime/contract/resources.h"
 #include "models/qwen3_5/frontend/prepared_prompt.h"
@@ -951,6 +952,26 @@ public:
     // it knows which of those facts change what a stored page means. A store whose header carries
     // a different string is never matched, so this is the guard against restoring a checkpoint
     // written by a differently configured model.
+    // Persistent prompt cache. Program owns every physical transfer the disk tier performs,
+    // because the pinned Host State slot and Host KV extents a record is made of are its own.
+    // The Engine only decides when a record is written or read.
+    //
+    // `prepare_prompt_cache_capture` runs on the Engine worker. It pins one checkpoint's Host
+    // replicas and returns the token the spill request must carry; a disengaged result means the
+    // checkpoint is not fully Host resident and must not be spilled, because reading it back
+    // would contend with the decode round for the transfer stream. Every prepared token is
+    // released again by `release_finished_prompt_cache_captures` once the tier has finished or
+    // dropped it, so the Engine calls that on every maintenance step and the tier is always torn
+    // down before the Program.
+    [[nodiscard]] runtime::ContextDiskTransferPort& prompt_cache_port();
+    [[nodiscard]] std::optional<std::uint64_t>
+    prepare_prompt_cache_capture(const ContinuationHandle& owner,
+                                 runtime::CheckpointRef checkpoint);
+    [[nodiscard]] std::optional<std::uint64_t>
+    prepare_prompt_cache_capture(const SharedPrefixHandle& owner,
+                                 runtime::CheckpointRef checkpoint);
+    void release_finished_prompt_cache_captures() noexcept;
+
     [[nodiscard]] ContextCacheSignatureFacts
     context_cache_signature_facts(std::string_view artifact_identity) const;
     [[nodiscard]] std::string context_cache_signature(std::string_view artifact_identity) const;

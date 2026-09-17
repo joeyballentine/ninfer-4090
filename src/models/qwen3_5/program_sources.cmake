@@ -23,6 +23,7 @@ target_sources(ninfer_model_runtime PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/program/speculative/mtp.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/program/speculative/target_verification.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/program/round_buffers.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/program/prompt_cache_port.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/program/prefix_identity.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/program/vision_control.cpp"
 )

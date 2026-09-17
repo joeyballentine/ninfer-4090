@@ -479,6 +479,26 @@ std::string Program::context_cache_signature(std::string_view artifact_identity)
     return qwen3_5::context_cache_signature(context_cache_signature_facts(artifact_identity));
 }
 
+runtime::ContextDiskTransferPort& Program::prompt_cache_port() {
+    return impl_->prompt_cache_port();
+}
+
+std::optional<std::uint64_t>
+Program::prepare_prompt_cache_capture(const ContinuationHandle& owner,
+                                      runtime::CheckpointRef checkpoint) {
+    return impl_->prepare_prompt_cache_capture(owner, checkpoint);
+}
+
+std::optional<std::uint64_t>
+Program::prepare_prompt_cache_capture(const SharedPrefixHandle& owner,
+                                      runtime::CheckpointRef checkpoint) {
+    return impl_->prepare_prompt_cache_capture(owner, checkpoint);
+}
+
+void Program::release_finished_prompt_cache_captures() noexcept {
+    impl_->release_finished_prompt_cache_captures();
+}
+
 PhysicalUsageSnapshot Program::physical_usage() const noexcept { return impl_->physical_usage(); }
 
 MemorySummary Program::memory_summary() const noexcept { return impl_->memory_summary(); }

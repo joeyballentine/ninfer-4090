@@ -11,6 +11,7 @@
 
 #include "models/qwen3_5/program/planning/startup.h"
 #include "models/qwen3_5/program/storage/draft_context.h"
+#include "models/qwen3_5/program/prompt_cache_port.h"
 #include "models/qwen3_5/program/storage/host_kv_store.h"
 #include "models/qwen3_5/program/storage/kv_store.h"
 #include "models/qwen3_5/program/storage/state_store.h"
@@ -558,6 +559,26 @@ public:
     [[nodiscard]] qwen3_5::ContextCacheSignatureFacts
     context_cache_signature_facts(std::string_view artifact_identity) const;
 
+    // --- persistent prompt cache -------------------------------------------------------------
+
+    // Backend KV frontier implied by one main frontier. MTP trails the target by one token and
+    // DFlash tracks it exactly; without a backend there is none.
+    [[nodiscard]] std::uint32_t checkpoint_backend_frontier(std::uint32_t frontier) const noexcept {
+        if (frontier == 0) { return 0; }
+        return speculative_backend == SpeculativeBackend::Mtp      ? frontier - 1U
+               : speculative_backend == SpeculativeBackend::DFlash ? frontier
+                                                                   : 0U;
+    }
+
+    [[nodiscard]] PromptCacheTransferPort& prompt_cache_port();
+    [[nodiscard]] std::optional<std::uint64_t>
+    prepare_prompt_cache_capture(const ContinuationHandle& owner,
+                                 runtime::CheckpointRef checkpoint);
+    [[nodiscard]] std::optional<std::uint64_t>
+    prepare_prompt_cache_capture(const SharedPrefixHandle& owner,
+                                 runtime::CheckpointRef checkpoint);
+    void release_finished_prompt_cache_captures() noexcept;
+
     [[nodiscard]] qwen3_5::PhysicalUsageSnapshot physical_usage() const noexcept;
 
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
@@ -601,6 +622,9 @@ public:
     std::unique_ptr<qwen3_5::StateImageDevicePool> state_images;
     std::unique_ptr<qwen3_5::HostStatePool> host_state_images;
     std::unique_ptr<StateImageStore> state_store;
+    // Constructed on first use: only an Engine with `--prompt-cache` ever asks for it, and it
+    // must outlive no Program state, so it is torn down with the rest of the context stores.
+    std::unique_ptr<PromptCacheTransferPort> prompt_cache_port_;
     std::optional<GdnReplayRecords> replay_records;
     std::optional<ops::GdnReplayFoldPlan> replay_fold;
     std::optional<DFlashPersistentState> dflash;

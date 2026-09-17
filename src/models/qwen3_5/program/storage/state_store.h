@@ -227,6 +227,38 @@ public:
         --object.checkpoint_references;
     }
 
+    // Host-side source pin for the persistent prompt cache. It protects the Host replica of an
+    // immutable checkpoint while an I/O thread reads it: every drop, release, move and recycle
+    // path already refuses to run while `source_pins` is nonzero, so the pinned bytes cannot move
+    // or be freed under the reader.
+    [[nodiscard]] bool can_pin_host_source(StateImageHandle handle) const noexcept {
+        if (!valid(handle)) { return false; }
+        const Object& object = objects_[handle.index_];
+        return object.role == StateImageRole::CheckpointImmutable && object.host_slot.has_value() &&
+               !has_pending_replica(object) &&
+               object.source_pins != std::numeric_limits<std::uint32_t>::max();
+    }
+
+    void pin_host_source(StateImageHandle handle) {
+        if (!can_pin_host_source(handle)) {
+            throw std::logic_error("StateImage Host replica is not pinnable");
+        }
+        ++objects_[handle.index_].source_pins;
+    }
+
+    void unpin_host_source(StateImageHandle handle) noexcept {
+        if (!valid(handle) || objects_[handle.index_].source_pins == 0) { return; }
+        --objects_[handle.index_].source_pins;
+    }
+
+    [[nodiscard]] qwen3_5::HostStateImageConstView host_view(StateImageHandle handle) const {
+        const Object& object = require(handle);
+        if (host_ == nullptr || !object.host_slot) {
+            throw std::logic_error("StateImage has no published Host replica");
+        }
+        return host_->view(*object.host_slot);
+    }
+
     [[nodiscard]] std::int32_t physical_slot(StateImageHandle handle) const {
         const Object& object = require(handle);
         if (!object.device_slot) {

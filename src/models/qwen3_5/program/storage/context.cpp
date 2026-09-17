@@ -741,11 +741,8 @@ ProgramImpl::checkpoint_summary(const SequenceState& sequence, runtime::Checkpoi
     } else if (state_location != StateReplicaResidency::DeviceOnly) {
         throw std::logic_error("checkpoint StateImage has no published replica");
     }
-    const std::uint32_t backend_frontier =
-        speculative_backend == SpeculativeBackend::Mtp      ? checkpoint.frontier - 1U
-        : speculative_backend == SpeculativeBackend::DFlash ? checkpoint.frontier
-                                                            : 0U;
-    const std::uint32_t identity_tag = static_cast<std::uint32_t>(speculative_backend) |
+    const std::uint32_t backend_frontier = checkpoint_backend_frontier(checkpoint.frontier);
+    const std::uint32_t identity_tag     = static_cast<std::uint32_t>(speculative_backend) |
                                        (static_cast<std::uint32_t>(proposal_head) << 8U) |
                                        (kv_storage.identity_tag() << 16U);
     return qwen3_5::CheckpointSummary{
@@ -767,6 +764,33 @@ ProgramImpl::checkpoint_summary(const SequenceState& sequence, runtime::Checkpoi
             },
         .rebuild_work = validated_rebuild_work(rebuild_work, checkpoint.frontier),
     };
+}
+
+PromptCacheTransferPort& ProgramImpl::prompt_cache_port() {
+    if (!prompt_cache_port_) {
+        prompt_cache_port_ = std::make_unique<PromptCacheTransferPort>(*this);
+    }
+    return *prompt_cache_port_;
+}
+
+std::optional<std::uint64_t>
+ProgramImpl::prepare_prompt_cache_capture(const ContinuationHandle& owner,
+                                          runtime::CheckpointRef checkpoint) {
+    if (!valid_continuation(owner)) { return std::nullopt; }
+    return prompt_cache_port().prepare_capture(continuation_states[ContractAccess::index(owner)],
+                                               checkpoint);
+}
+
+std::optional<std::uint64_t>
+ProgramImpl::prepare_prompt_cache_capture(const SharedPrefixHandle& owner,
+                                          runtime::CheckpointRef checkpoint) {
+    if (!valid_shared_prefix(owner)) { return std::nullopt; }
+    return prompt_cache_port().prepare_capture(shared_prefix_states[ContractAccess::index(owner)],
+                                               checkpoint);
+}
+
+void ProgramImpl::release_finished_prompt_cache_captures() noexcept {
+    if (prompt_cache_port_) { prompt_cache_port_->release_finished(); }
 }
 
 qwen3_5::ContinuationSummary
