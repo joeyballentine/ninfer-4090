@@ -25,4 +25,8 @@ same license by:
 - nmorgowicz (https://github.com/nmorgowicz/ninfer-windows): --tolerant-tool-calls.
 - dylanbrodiefafard (https://github.com/dylanbrodiefafard/ninfer): incremental host encode.
 
+The web UI that ninfer-serve embeds is llama.cpp's prebuilt UI (ggml-org/llama.cpp),
+MIT licensed. Its license text is in third_party/llama-webui/LICENSE; the release is
+pinned in cmake/NinferWebUI.cmake and fetched at configure time rather than vendored.
+
 Model weights are Qwen (Alibaba Cloud); DFlash companion weights are from z-lab.

@@ -57,6 +57,8 @@ selected for this process.
 | `GET /health` | Engine readiness |
 | `GET /metrics` | Prometheus text exposition of cumulative serving counters and executor gauges |
 | `GET /slots` | JSON snapshot of the executor's lanes and the accepted pending tail |
+| `GET /props` | web-UI support: model identity, context size, slot count and default sampling |
+| `GET /` | the embedded web UI, when the build has one |
 | `GET /v1/models` | configured OpenAI model alias and effective `max_model_len` |
 | `GET /v1/models/{id}` | lookup of the configured alias and effective `max_model_len` |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
@@ -147,6 +149,119 @@ the owning request's own stream, so it is not part of this snapshot; use
 `llamacpp:tokens_predicted_total` for aggregate decode throughput.
 
 This endpoint is NInfer's own contract, not llama.cpp's `/slots` shape.
+
+## Web UI
+
+A build with `NINFER_EMBED_WEBUI=ON` (this fork's default) serves a chat UI from the server
+itself. Point a browser at the listen address:
+
+```
+http://127.0.0.1:8080/
+```
+
+The UI is llama.cpp's own prebuilt web UI, MIT licensed; see `third_party/llama-webui/LICENSE`.
+It talks to the endpoints documented above: `POST /v1/chat/completions` for generation,
+`GET /v1/models` for the model list, `GET /props` and `GET /slots` for server state. NInfer adds
+no UI code of its own.
+
+### Build option
+
+`NINFER_EMBED_WEBUI` downloads the pinned llama.cpp UI release at configure time, verifies it
+against the SHA-256 recorded in `cmake/NinferWebUI.cmake`, extracts it, and compiles it into
+`ninfer_serve` as a generated table of path, bytes, ETag and MIME type. A digest mismatch or a
+failed download is a hard configure error, never a silent build without the UI. The tag and the
+digest are pinned in that one file.
+
+Upstream NInfer policy avoids configure-time downloads; this fork ships the UI, so the option
+defaults on here. Two ways to configure without network access:
+
+```bash
+cmake -B build -DNINFER_EMBED_WEBUI=OFF                              # no UI at all
+cmake -B build -DNINFER_WEBUI_TARBALL=/path/llama-b10655-ui.tar.gz   # UI from a local copy
+```
+
+The local archive must be the same pinned release; it is checked against the same digest. With
+the option off nothing is downloaded, no UI route is registered, and `GET /` is an ordinary
+unrouted 404.
+
+### Routes and caching
+
+`GET /` and `GET /index.html` both return the entry document. Every other embedded path is served
+at its own URL with the MIME type recorded in the table (`html`, `js`, `css`, `json`,
+`webmanifest`, `svg`, `png`, `ico`, `txt`, `woff2`). Responses carry a strong `ETag` and answer
+`If-None-Match` with 304.
+
+| Asset | `Cache-Control` |
+|---|---|
+| `_app/immutable/**` | `public, max-age=31536000, immutable` |
+| `index.html`, `sw.js`, `*.webmanifest`, `_app/version.json`, `build.json` | `no-cache` |
+| everything else (icons, splash images) | `public, max-age=3600` |
+
+The content hash is part of every `_app/immutable/**` file name, so a changed file is a changed
+URL and a year-long cache can never go stale. The documents that decide *which* hashed URLs the
+browser loads are revalidated instead.
+
+An unmatched `GET` that accepts `text/html` and does not begin with `/v1/`, `/health`, `/metrics`,
+`/slots` or `/props` returns the entry document, so the UI's client-side routes (for example
+`/chat/<id>`) survive a reload. Those five prefixes are never answered with HTML: an unrouted API
+path keeps the 404 behavior documented for its protocol.
+
+With `--api-key` set, the static documents stay public — the UI has to load before it can ask for
+a key — while every API path, `/props` included, still requires it. The UI stores the key in the
+browser, sends it as `Authorization: Bearer`, and treats a 401 or 403 from `/props` as the signal
+to prompt for one.
+
+### `GET /props`
+
+UI support only. This is not part of the OpenAI contract and carries no compatibility promise;
+it exists because the web UI reads it on load. It requires the API key when `--api-key` is set,
+and it is registered only when the build embeds the UI.
+
+```json
+{
+  "model_path": "/models/qwen3.5.ninfer",
+  "model_alias": "qwen3.5",
+  "build_info": "ninfer (qwen3)",
+  "total_slots": 4,
+  "n_ctx": 65536,
+  "chat_template": "{# NInfer applies the model artifact's chat template in-engine. #}\n{%- if enable_thinking %}{%- endif %}",
+  "modalities": {"vision": true, "audio": false, "video": false},
+  "default_generation_settings": {
+    "n_ctx": 65536,
+    "params": {"temperature": 0.7, "top_k": 20, "top_p": 0.8, "min_p": 0.05,
+               "presence_penalty": 0.0, "frequency_penalty": 0.0, "max_tokens": 2048}
+  },
+  "endpoint_props": true,
+  "endpoint_slots": true,
+  "endpoint_metrics": true
+}
+```
+
+Every field is read from configuration that already exists: `model_path` is the artifact path,
+`model_alias` is the same public model id `GET /v1/models` advertises, `n_ctx` is `--max-context`,
+`total_slots` is `--max-concurrency`, `modalities.vision` is `--vision`, and `params` is the
+Engine's registered non-thinking sampling preset plus the effective default for `max_tokens`.
+
+`chat_template` is a descriptor, not a template. NInfer applies the model artifact's own chat
+template inside the Engine and never exposes the text. The UI reads this field for two things: to
+show where the template came from, and to decide whether to offer its thinking controls, which it
+does by looking for the `enable_thinking` kwarg. The descriptor therefore names the source
+(`--chat-template` when one is set) and advertises `enable_thinking` unless `--no-thinking`
+disabled it.
+
+There is no `role` field, which keeps the UI in single-model mode: this server hosts one resident
+model, not a router.
+
+### Timings the UI displays
+
+The UI's tokens/s readout comes from the `timings` object that Chat Completions already returns;
+no separate accounting exists for it. A non-streaming response carries `timings` next to `usage`.
+A stream carries it on the terminal chunk, and on every content chunk when the request asks for
+`timings_per_token`, which the UI does. The UI reads `prompt_n`, `prompt_ms`, `predicted_n`,
+`predicted_ms` and `cache_n` and computes the rates itself; `prompt_per_second` and
+`predicted_per_second` are sent as well. See
+[llama.cpp-compatible request observations](#llamacpp-compatible-request-observations) for the
+full object and its exact semantics.
 
 ## OpenAI Chat Completions
 
@@ -338,6 +453,9 @@ speed uses `max(predicted_n - 1, 0)` token intervals; the first token belongs to
 is not counted again as a decode interval. Zero-token, one-token, zero-duration, and exact-cache-hit
 cases report finite zero rates rather than `NaN` or infinity. Speculative requests additionally
 include terminal `draft_n` and `draft_n_accepted` when draft work occurred.
+
+This object is what the embedded web UI displays as its tokens/s readout; it sends
+`timings_per_token: true` to update the figure while the answer streams.
 
 Set top-level `timings_per_token: true` on a streaming request to attach the latest cumulative
 timing snapshot to each visible reasoning or content chunk. This does not enable terminal timings,
@@ -822,7 +940,8 @@ curl http://127.0.0.1:8080/v1/messages/count_tokens \
 
 Pass `--api-key VALUE` to require the same value as an OpenAI bearer token or Anthropic
 `x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated; `GET /metrics` and
-`GET /slots` do not.
+`GET /slots` do not. The embedded web UI's static documents are also unauthenticated, because the
+page has to load before it can ask for a key; `GET /props` and every `/v1/` path are not.
 
 ```bash
 curl http://127.0.0.1:8080/v1/models \
