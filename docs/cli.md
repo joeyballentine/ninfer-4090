@@ -231,6 +231,9 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--wddm-evictable-budget` | budget runtime memory against total VRAM instead of the WDDM process budget (Windows only) | off |
+| `--prompt-cache` | reuse computed prefixes from disk across invocations | off |
+| `--prompt-cache-dir DIR` | persistent prompt cache directory | `<artifact dir>/.ninfer-cache/<config signature>` |
+| `--prompt-cache-max-bytes N` | persistent prompt cache size cap, evicted least-recently-used | `32212254720` (30 GiB) |
 | `--chat-template FILE` | use a local Jinja template | artifact template |
 | `--no-thinking` | disable thinking | template default |
 | `--thinking-budget N` | positive model-origin thinking-token cap; omitted means unlimited | unset |
@@ -262,6 +265,20 @@ precise-coding profile use explicit sampling overrides.
 Repeat `--stop-token-id`, `--stop`, or `--reasoning-stop` to add stop conditions. Use
 `--raw-output` to expose the frontend's raw output stream and `--print-token-ids` to include
 generated token IDs in diagnostics.
+
+One invocation serves one request, so without `--prompt-cache` nothing is retained: every run
+prefills its whole prompt. `--prompt-cache` gives the retained prefix a consumer - the next
+invocation - by writing the computed checkpoint to disk and restoring it when a later run shares
+the prefix. Only the uncovered suffix is then prefilled. This is what makes repeated runs over one
+long document or one growing conversation worth doing from the CLI at all: a restore is bounded by
+storage bandwidth, not by compute, and on the donor fork's NVMe a 152k-token checkpoint came back in
+367 ms against 162 s of cold prefill. The equivalent figure for this implementation has not been
+measured yet.
+
+Records carry the artifact and KV-layout signature, so changing the model, `--kv-dtype` or the
+context geometry never matches a stored record. `--prompt-cache-dir` and `--prompt-cache-max-bytes`
+require `--prompt-cache`. The store holds plaintext model state, so place it somewhere with the
+same access restrictions as the prompts it came from.
 
 Run `./build/apps/ninfer --help` for the exact option contract.
 

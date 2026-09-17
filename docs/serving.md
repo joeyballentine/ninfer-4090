@@ -877,6 +877,9 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--max-private-continuations N` | private continuation descriptor capacity | `2 * max-concurrency` |
 | `--max-shared-prefixes N` | Engine-wide shared stable-prefix descriptor capacity | `max(max-concurrency, 4)` |
 | `--max-long-anchors-per-continuation N` | private long-anchor limit per continuation | `2` |
+| `--prompt-cache` | keep computed prefixes on disk across restarts | off |
+| `--prompt-cache-dir DIR` | persistent prompt cache directory | `<artifact dir>/.ninfer-cache/<config signature>` |
+| `--prompt-cache-max-bytes N` | persistent prompt cache size cap, evicted least-recently-used | `32212254720` (30 GiB) |
 | `--no-thinking` | disable thinking by default | thinking on |
 | `--preserve-thinking` | preserve closed-turn assistant reasoning by default | off |
 | `--tolerant-tool-calls` | recover complete Qwen tool calls from malformed wrapper or suffix output | off |
@@ -916,6 +919,23 @@ independent startup-fixed pinned-memory capacities; Host KV is shared by Main an
 Backend pool and is consumed in physical page extents. `--no-prefix-reuse` selects root-only Engine
 mode and cannot be combined with any of the seven explicit context-cache capacity flags, including
 zero-valued flags.
+
+`--prompt-cache` adds a third tier below those two: a checkpoint that leaves the pinned host slots
+is written to disk and can be restored by a later request, including one served by a different
+process. That is what it buys - Device and Host checkpoints do not survive a restart, and a working
+set larger than `--host-kv-mib` does not survive the host budget either, so today both cases
+re-prefill from scratch. A restore is bounded by storage bandwidth rather than by compute: on the
+donor fork's NVMe, a 152k-token checkpoint came back in 367 ms against 162 s of cold prefill. The
+equivalent figure for this implementation's portable path has not been measured yet.
+
+Records are keyed by the same content identity as in-memory prefix reuse and carry the artifact and
+KV-layout signature, so a different model, KV storage or context geometry never matches one. The
+store is written asynchronously and never blocks a decode round. `--prompt-cache-dir` and
+`--prompt-cache-max-bytes` require `--prompt-cache`, and `--prompt-cache` cannot be combined with
+`--no-prefix-reuse`. Reaching the size cap evicts least-recently-used records in one pass.
+
+The store is plaintext model state on the filesystem. Give it a directory with the same access
+restrictions as the conversation data it holds.
 
 Run `./build/apps/ninfer-serve --help` for the exact option contract.
 
