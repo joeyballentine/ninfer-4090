@@ -135,5 +135,30 @@ int main() {
                   (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--top-k", "21"});
               }),
               "CLI accepted top_k beyond the executable candidate domain");
+    const ninfer::cli::Options no_cache =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello"});
+    failures += check(!no_cache.prompt_cache && no_cache.prompt_cache_dir.empty() &&
+                          no_cache.prompt_cache_max_bytes == ninfer::kDefaultPromptCacheMaxBytes,
+                      "the persistent prompt cache is not off by default");
+    const ninfer::cli::Options cache =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--prompt-cache",
+               "--prompt-cache-dir", "/tmp/ninfer-prompt-cache", "--prompt-cache-max-bytes",
+               "1073741824"});
+    failures += check(cache.prompt_cache && cache.prompt_cache_dir == "/tmp/ninfer-prompt-cache" &&
+                          cache.prompt_cache_max_bytes == 1073741824ULL,
+                      "--prompt-cache options did not reach the CLI options");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--prompt-cache-dir", "/tmp/x"});
+                      }),
+                      "CLI accepted --prompt-cache-dir without --prompt-cache");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--prompt-cache", "--prompt-cache-max-bytes", "0"});
+                      }),
+                      "CLI accepted a zero prompt-cache size cap");
+    failures += check(help.find("--prompt-cache") != std::string::npos &&
+                          help.find("--prompt-cache-max-bytes") != std::string::npos,
+                      "CLI help omits the persistent prompt cache options");
     return failures == 0 ? 0 : 1;
 }

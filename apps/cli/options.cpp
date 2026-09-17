@@ -100,6 +100,7 @@ std::string usage_text(const char* argv0) {
            "       [--raw-output] [--print-token-ids] [--no-thinking] [--thinking-budget N]\n"
            "       [--reasoning-effort none|minimal|low|medium|high|xhigh|max] [--vision]\n"
            "       [--no-cuda-graph] [--wddm-evictable-budget]\n"
+           "       [--prompt-cache] [--prompt-cache-dir DIR] [--prompt-cache-max-bytes N]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "\n"
            "Streams answer content to stdout and reasoning plus diagnostics to stderr.\n"
@@ -113,6 +114,11 @@ std::string usage_text(const char* argv0) {
            "GPUs, ignoring the WDDM process budget (Windows only).\n"
            "--thinking-budget caps model-origin thinking tokens; inserted control tokens count "
            "toward --max-new.\n"
+           "--prompt-cache keeps computed prefixes on disk between runs, so a rerun that shares "
+           "a prefix restores it instead of prefilling it. The store defaults to "
+           "<artifact dir>/.ninfer-cache/<config signature> and to " +
+           std::to_string(kDefaultPromptCacheMaxBytes / (1024ULL * 1024ULL * 1024ULL)) +
+           " GiB, evicted least-recently-used.\n"
            "--kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom.\n"
@@ -213,6 +219,13 @@ Options parse_options(int argc, char** argv) {
             options.sampling.seed = parse_u64(value(arg), "seed");
         } else if (arg == "--greedy") {
             options.greedy = true;
+        } else if (arg == "--prompt-cache") {
+            options.prompt_cache = true;
+        } else if (arg == "--prompt-cache-dir") {
+            options.prompt_cache_dir = value(arg);
+        } else if (arg == "--prompt-cache-max-bytes") {
+            options.prompt_cache_max_bytes =
+                static_cast<std::size_t>(parse_u64(value(arg), "prompt-cache-max-bytes"));
         } else if (arg == "--log-level") {
             options.log_level = product::parse_log_level(value(arg));
         } else {
@@ -244,6 +257,15 @@ Options parse_options(int argc, char** argv) {
     if (options.reasoning_effort == ReasoningEffort::None) options.enable_thinking = false;
     if (options.enable_thinking == false && options.thinking_budget) {
         throw std::invalid_argument("--thinking-budget cannot be combined with --no-thinking");
+    }
+    if (!options.prompt_cache &&
+        (!options.prompt_cache_dir.empty() ||
+         options.prompt_cache_max_bytes != kDefaultPromptCacheMaxBytes)) {
+        throw std::invalid_argument(
+            "--prompt-cache-dir and --prompt-cache-max-bytes require --prompt-cache");
+    }
+    if (options.prompt_cache && options.prompt_cache_max_bytes == 0) {
+        throw std::invalid_argument("--prompt-cache-max-bytes must be positive");
     }
     if (options.greedy) { options.sampling.temperature = 0.0F; }
     return options;

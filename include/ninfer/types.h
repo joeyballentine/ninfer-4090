@@ -26,6 +26,7 @@ inline constexpr std::size_t kDefaultMediaCacheBytes     = 1ULL << 30;
 inline constexpr std::size_t kDefaultMediaLiveBytes      = 2ULL << 30;
 inline constexpr std::uint32_t kDefaultHostStateSlots    = 8;
 inline constexpr std::size_t kDefaultHostKvCapacityBytes = 8ULL << 30;
+inline constexpr std::size_t kDefaultPromptCacheMaxBytes = 30ULL << 30;
 
 enum class KvCacheStorage : std::uint8_t {
     BFloat16,
@@ -153,6 +154,17 @@ struct ContextCacheOptions {
     std::optional<std::uint32_t> max_long_anchors_per_continuation;
 };
 
+// Persistent third context tier. Device checkpoint -> pinned Host State slot -> Disk record.
+// Off by default: it writes to the filesystem and is only worth its cost for workloads that
+// resend a long prefix, such as an agent replaying a conversation every turn.
+struct PromptCacheOptions {
+    bool enabled = false;
+    // Empty selects `<artifact directory>/.ninfer-cache/<config signature>`. The signature covers
+    // the artifact and the KV layout, so a different model or KV storage never shares a store.
+    std::filesystem::path directory;
+    std::size_t max_bytes = kDefaultPromptCacheMaxBytes;
+};
+
 struct ContextCostOptions {
     // Empty selects generic defaults plus any matching values compiled into the binary. A
     // nonempty runtime preset independently overrides its matching machine transfer and
@@ -186,6 +198,7 @@ struct EngineOptions {
     // minimum eviction floor, instead of the WDDM process budget reported by cudaMemGetInfo.
     bool wddm_evictable_budget             = false;
     ContextCacheOptions context_cache;
+    PromptCacheOptions prompt_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;
 };
@@ -1011,6 +1024,21 @@ struct RuntimeStats {
     std::uint32_t shared_active_references             = 0;
     std::uint64_t historical_fork_hits                 = 0;
     double actual_context_transfer_seconds             = 0.0;
+
+    // Persistent prompt cache (disk tier). Zero throughout when --prompt-cache is off.
+    std::uint64_t prompt_cache_lookups        = 0;
+    std::uint64_t prompt_cache_hits           = 0;
+    std::uint64_t prompt_cache_restores       = 0;
+    std::uint64_t prompt_cache_restore_failures = 0;
+    std::uint64_t prompt_cache_restored_bytes = 0;
+    std::uint64_t prompt_cache_spills         = 0;
+    std::uint64_t prompt_cache_spills_dropped = 0;
+    std::uint64_t prompt_cache_spilled_bytes  = 0;
+    std::uint64_t prompt_cache_records        = 0;
+    std::uint64_t prompt_cache_evictions      = 0;
+    std::uint64_t prompt_cache_compactions    = 0;
+    std::uint64_t prompt_cache_live_bytes     = 0;
+    std::uint64_t prompt_cache_file_bytes     = 0;
 };
 
 enum class ContextCostPresetSource : std::uint8_t {
