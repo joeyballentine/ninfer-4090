@@ -55,7 +55,8 @@ selected for this process.
 | Method and path | Behavior |
 |---|---|
 | `GET /health` | Engine readiness |
-| `GET /metrics` | Prometheus text exposition of cumulative serving counters |
+| `GET /metrics` | Prometheus text exposition of cumulative serving counters and executor gauges |
+| `GET /slots` | JSON snapshot of the executor's lanes and the accepted pending tail |
 | `GET /v1/models` | configured OpenAI model alias and effective `max_model_len` |
 | `GET /v1/models/{id}` | lookup of the configured alias and effective `max_model_len` |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
@@ -91,11 +92,48 @@ when `--api-key` is set.
 | `ninfer:prefix_cache_hit_tokens_total` | prompt tokens served from a reused KV prefix |
 | `ninfer:draft_tokens_total` | speculative draft tokens proposed |
 | `ninfer:draft_accepted_tokens_total` | speculative draft tokens accepted by verification |
+| `llamacpp:requests_processing` | gauge: accepted requests occupying an execution lane |
+| `llamacpp:requests_deferred` | gauge: accepted requests waiting in the ingress FIFO |
+| `ninfer:requests_prefilling` | gauge: lane-resident requests still evaluating their prompt |
+| `ninfer:requests_decode_ready` | gauge: lane-resident requests eligible for the next decode round |
+| `ninfer:requests_materializing` | gauge: requests whose model state is being materialized onto a lane |
 
-The four `llamacpp:` families carry llama.cpp's `--metrics` semantics and names, so an existing
-llama.cpp scrape configuration reads this server without changes. The `ninfer:` families report
-prefix reuse and speculative acceptance, which llama.cpp has no equivalent for. Counters reset when
-the process restarts; scrapers are expected to difference them.
+The four `llamacpp:` counter families carry llama.cpp's `--metrics` semantics and names, so an
+existing llama.cpp scrape configuration reads this server without changes. The `ninfer:` families
+report prefix reuse and speculative acceptance, which llama.cpp has no equivalent for. Counters
+reset when the process restarts; scrapers are expected to difference them.
+
+The five gauges are read from the Engine's published runtime snapshot at scrape time, not
+recomputed by the HTTP layer, so they report the executor's own occupancy rather than the number of
+open HTTP requests.
+
+### Slots
+
+`GET /slots` reports the executor's lane table. It requires the API key when `--api-key` is set.
+
+```json
+{
+  "slots": [
+    {"id": 0, "state": "processing", "request_id": 7, "protocol": "openai.chat",
+     "model": "qwen3.5", "n_prompt_tokens": 500, "elapsed_seconds": 1.8,
+     "n_ctx": 65536, "speculative": true},
+    {"id": 1, "state": "idle", "request_id": null, "n_prompt_tokens": 0,
+     "n_ctx": 65536, "speculative": true}
+  ],
+  "pending": [],
+  "requests_processing": 1,
+  "requests_deferred": 0
+}
+```
+
+`slots` always has `--max-concurrency` entries. The Engine publishes how many lanes are occupied
+but not which request sits on which lane; because admission is bounded FIFO without preemption, the
+oldest accepted requests are the lane-resident ones and the remainder is reported under `pending`.
+`n_prompt_tokens` is the prompt size resolved at admission. Decode progress is published only to
+the owning request's own stream, so it is not part of this snapshot; use
+`llamacpp:tokens_predicted_total` for aggregate decode throughput.
+
+This endpoint is NInfer's own contract, not llama.cpp's `/slots` shape.
 
 Every OpenAI-compatible response carries a unique `x-request-id` header, including streaming and
 error responses. Anthropic endpoints use their separate `request-id` contract.
@@ -765,7 +803,8 @@ curl http://127.0.0.1:8080/v1/messages/count_tokens \
 ## Authentication and CORS
 
 Pass `--api-key VALUE` to require the same value as an OpenAI bearer token or Anthropic
-`x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated; `GET /metrics` does not.
+`x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated; `GET /metrics` and
+`GET /slots` do not.
 
 ```bash
 curl http://127.0.0.1:8080/v1/models \

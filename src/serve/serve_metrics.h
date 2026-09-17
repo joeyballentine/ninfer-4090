@@ -14,14 +14,58 @@
 #include "serve/generation_service.h"
 #include "serve/request_events.h"
 
+#include <chrono>
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace ninfer::serve {
 
+// Engine-owned occupancy, read from the Engine's published RuntimeStats snapshot. The serve layer
+// never recomputes these numbers: whether a submitted request currently occupies an execution lane
+// is the executor's answer, not the HTTP layer's.
+struct ExecutorGauges {
+    std::uint32_t max_concurrency = 0;
+    std::uint32_t max_context     = 0;
+    std::uint32_t running         = 0;
+    std::uint32_t prefilling      = 0;
+    std::uint32_t decode_ready    = 0;
+    std::uint32_t waiting         = 0;
+    std::uint32_t materializing   = 0;
+    bool speculative              = false;
+};
+
+[[nodiscard]] ExecutorGauges make_executor_gauges(const ServeOptions& options,
+                                                  const ninfer::RuntimeStats& stats);
+
+// One accepted request that has not reached a terminal boundary yet.
+struct InFlightRequest {
+    std::uint64_t request_id = 0;
+    std::string protocol;
+    std::string model;
+    int prompt_tokens      = 0;
+    double elapsed_seconds = 0.0;
+};
+
+// `GET /slots`: the executor's lane table, with the pending FIFO tail that has been accepted but
+// does not occupy a lane yet.
+[[nodiscard]] std::string render_slots_json(const ExecutorGauges& gauges,
+                                            const std::vector<InFlightRequest>& in_flight);
+
 class ServeMetrics {
 public:
+    // In-flight bookkeeping on the same request funnel as the counters. `end_request` is
+    // idempotent and is reached from the done, failure, and rejection paths alike, so no terminal
+    // outcome can leave a permanently occupied entry behind.
+    void begin_request(const RequestLogContext& context);
+    void end_request(std::uint64_t request_id);
+
+    // Accepted requests that have not terminated, oldest first. Request ids are assigned in
+    // arrival order, so this is the ingress FIFO order the executor admits from.
+    [[nodiscard]] std::vector<InFlightRequest> in_flight_snapshot() const;
+
     // One completed request, taken from the request-done funnel.
     void record_done(const GenerationOutcome& outcome);
 
@@ -30,8 +74,10 @@ public:
     void record_failure(const RequestFailure& failure);
     void record_rejected();
 
-    // One complete Prometheus text body, without HTTP framing. Ends with a newline.
-    [[nodiscard]] std::string render() const;
+    // One complete Prometheus text body, without HTTP framing. Ends with a newline. The executor
+    // gauges are passed in rather than cached so a scrape reports the Engine's current occupancy
+    // instead of whatever the last terminal request observed.
+    [[nodiscard]] std::string render(const ExecutorGauges& gauges) const;
 
 private:
     mutable std::mutex mutex_;
@@ -45,6 +91,15 @@ private:
     std::uint64_t prefix_cache_hit_tokens_total_     = 0;
     std::uint64_t speculative_draft_tokens_total_    = 0;
     std::uint64_t speculative_accepted_tokens_total_ = 0;
+
+    struct InFlightEntry {
+        std::string protocol;
+        std::string model;
+        int prompt_tokens = 0;
+        std::chrono::steady_clock::time_point started;
+    };
+
+    std::map<std::uint64_t, InFlightEntry> in_flight_;
 };
 
 } // namespace ninfer::serve

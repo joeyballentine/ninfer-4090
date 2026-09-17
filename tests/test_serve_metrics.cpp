@@ -1,17 +1,44 @@
 #include "serve/serve_metrics.h"
 
+#include <nlohmann/json.hpp>
+
 #include <iostream>
 #include <map>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 
+using ninfer::serve::ExecutorGauges;
 using ninfer::serve::GenerationOutcome;
+using ninfer::serve::InFlightRequest;
+using ninfer::serve::RequestLogContext;
 using ninfer::serve::RequestFailure;
 using ninfer::serve::RequestFailureClass;
 using ninfer::serve::RequestFailurePhase;
+using ninfer::serve::render_slots_json;
 using ninfer::serve::ServeMetrics;
+
+ExecutorGauges gauges(std::uint32_t max_concurrency, std::uint32_t running, std::uint32_t waiting) {
+    return ExecutorGauges{.max_concurrency = max_concurrency,
+                          .max_context     = 65536,
+                          .running         = running,
+                          .prefilling      = running != 0 ? 1U : 0U,
+                          .decode_ready    = 0,
+                          .waiting         = waiting,
+                          .materializing   = 0,
+                          .speculative     = true};
+}
+
+RequestLogContext started(std::uint64_t id, const char* protocol, int prompt_tokens) {
+    RequestLogContext context;
+    context.id            = id;
+    context.protocol      = protocol;
+    context.model         = "qwen3.5";
+    context.prompt_tokens = prompt_tokens;
+    return context;
+}
 
 int check(bool condition, const char* message) {
     if (condition) { return 0; }
@@ -66,7 +93,7 @@ int main() {
     int failures = 0;
 
     ServeMetrics metrics;
-    const Exposition empty = parse(metrics.render());
+    const Exposition empty = parse(metrics.render(gauges(1, 0, 0)));
     failures += check(empty.samples.at("llamacpp:prompt_tokens_total") == 0.0,
                       "prompt token counter does not start at zero");
     failures += check(empty.samples.at("ninfer:requests_total") == 0.0,
@@ -82,7 +109,7 @@ int main() {
     // recomputed tokens may be billed as prefill work.
     metrics.record_done(outcome(1200, 900, 100, 0, 0.1, 2.0, 150, 75));
 
-    const Exposition values = parse(metrics.render());
+    const Exposition values = parse(metrics.render(gauges(1, 0, 0)));
     failures += check(values.samples.at("llamacpp:prompt_tokens_total") == 1300.0,
                       "computed prefill tokens exclude reused prefix tokens");
     failures += check(values.samples.at("llamacpp:prompt_seconds_total") == 0.6,
@@ -106,7 +133,7 @@ int main() {
 
     // A reuse report larger than the prompt must clamp both series, never wrap.
     metrics.record_done(outcome(10, 50, 1, 0, 0.0, 0.1, 0, 0));
-    const Exposition clamped = parse(metrics.render());
+    const Exposition clamped = parse(metrics.render(gauges(1, 0, 0)));
     failures += check(clamped.samples.at("llamacpp:prompt_tokens_total") == 1300.0,
                       "prefill token counter underflowed on an oversized reuse report");
     failures += check(clamped.samples.at("ninfer:prefix_cache_hit_tokens_total") == 910.0,
@@ -117,13 +144,72 @@ int main() {
     failure.classification = RequestFailureClass::Internal;
     metrics.record_failure(failure);
     metrics.record_rejected();
-    const Exposition terminal = parse(metrics.render());
+    const Exposition terminal = parse(metrics.render(gauges(1, 0, 0)));
     failures += check(terminal.samples.at("ninfer:requests_total") == 5.0,
                       "failed and rejected requests are not counted as terminal");
     failures += check(terminal.samples.at("ninfer:requests_failed_total") == 2.0,
                       "failed and rejected requests are not counted as failures");
     failures += check(terminal.samples.at("llamacpp:tokens_predicted_total") == 301.0,
                       "a failure must not change token accounting");
+
+    // Gauges are the Engine's published occupancy, not a serve-layer recount.
+    const Exposition busy = parse(metrics.render(gauges(2, 2, 3)));
+    failures += check(busy.samples.at("llamacpp:requests_processing") == 2.0,
+                      "processing gauge does not follow the Engine lane occupancy");
+    failures += check(busy.samples.at("llamacpp:requests_deferred") == 3.0,
+                      "deferred gauge does not follow the Engine ingress queue");
+    failures += check(busy.types.at("llamacpp:requests_processing") == "gauge",
+                      "occupancy families must be declared as gauges");
+
+    // Two lanes, three accepted requests, one lane still free: the two oldest are resident, the
+    // newest is the pending tail, and the free lane reads idle.
+    metrics.begin_request(started(7, "openai.chat", 500));
+    metrics.begin_request(started(8, "anthropic.messages", 900));
+    metrics.begin_request(started(9, "openai.responses", 100));
+    const std::vector<InFlightRequest> snapshot = metrics.in_flight_snapshot();
+    failures +=
+        check(snapshot.size() == 3 && snapshot[0].request_id == 7 && snapshot[2].request_id == 9,
+              "in-flight snapshot is not in arrival order");
+    failures +=
+        check(snapshot[1].prompt_tokens == 900 && snapshot[1].protocol == "anthropic.messages",
+              "in-flight snapshot lost request detail");
+
+    const nlohmann::json slots =
+        nlohmann::json::parse(render_slots_json(gauges(3, 2, 1), snapshot));
+    failures += check(slots.at("slots").size() == 3, "one slot per configured execution lane");
+    failures += check(slots.at("slots").at(0).at("state") == "processing" &&
+                          slots.at("slots").at(0).at("request_id") == 7 &&
+                          slots.at("slots").at(0).at("n_prompt_tokens") == 500,
+                      "the oldest accepted request does not occupy the first lane");
+    failures += check(slots.at("slots").at(1).at("request_id") == 8,
+                      "the second lane does not hold the second oldest request");
+    failures += check(slots.at("slots").at(2).at("state") == "idle" &&
+                          slots.at("slots").at(2).at("request_id").is_null(),
+                      "an unoccupied lane is not reported idle");
+    failures += check(slots.at("slots").at(0).at("n_ctx") == 65536 &&
+                          slots.at("slots").at(0).at("speculative") == true,
+                      "slot lane configuration is not reported");
+    failures +=
+        check(slots.at("pending").size() == 1 && slots.at("pending").at(0).at("request_id") == 9,
+              "the FIFO tail beyond the occupied lanes is not reported as pending");
+    failures += check(slots.at("requests_processing") == 2 && slots.at("requests_deferred") == 1,
+                      "slot totals disagree with the lane assignment");
+
+    // A terminal outcome releases the entry on every path, including failure.
+    metrics.end_request(7);
+    metrics.end_request(7);
+    metrics.end_request(8);
+    metrics.end_request(9);
+    failures += check(metrics.in_flight_snapshot().empty(),
+                      "a terminal request left an occupied in-flight entry behind");
+
+    // An Engine that reports more resident requests than the serve layer tracks must not index
+    // past the snapshot.
+    const nlohmann::json drained =
+        nlohmann::json::parse(render_slots_json(gauges(2, 2, 0), metrics.in_flight_snapshot()));
+    failures += check(drained.at("requests_processing") == 0 &&
+                          drained.at("slots").at(0).at("state") == "idle",
+                      "lane assignment exceeded the tracked in-flight requests");
 
     if (failures == 0) { std::cout << "serve metrics OK\n"; }
     return failures == 0 ? 0 : 1;

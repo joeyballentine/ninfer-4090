@@ -1,13 +1,18 @@
 #include "serve/serve_metrics.h"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstdio>
 #include <system_error>
+#include <utility>
 
 namespace ninfer::serve {
 namespace {
+
+using Json = nlohmann::json;
 
 struct Family {
     const char* name;
@@ -71,8 +76,110 @@ constexpr Family kDraftTokens{"ninfer:draft_tokens_total", "counter",
                               "Speculative draft tokens proposed."};
 constexpr Family kDraftAccepted{"ninfer:draft_accepted_tokens_total", "counter",
                                 "Speculative draft tokens accepted by verification."};
+constexpr Family kProcessing{"llamacpp:requests_processing", "gauge",
+                             "Accepted requests currently occupying an execution lane."};
+constexpr Family kDeferred{"llamacpp:requests_deferred", "gauge",
+                           "Accepted requests waiting in the ingress FIFO for a lane."};
+constexpr Family kPrefilling{"ninfer:requests_prefilling", "gauge",
+                             "Lane-resident requests whose prompt is still being evaluated."};
+constexpr Family kDecodeReady{"ninfer:requests_decode_ready", "gauge",
+                              "Lane-resident requests eligible for the next decode round."};
+constexpr Family kMaterializing{"ninfer:requests_materializing", "gauge",
+                                "Requests whose model state is being materialized onto a lane."};
 
 } // namespace
+
+ExecutorGauges make_executor_gauges(const ServeOptions& options,
+                                    const ninfer::RuntimeStats& stats) {
+    return ExecutorGauges{
+        .max_concurrency = options.max_concurrency,
+        .max_context     = options.max_context,
+        .running         = stats.running_requests,
+        .prefilling      = stats.prefilling_requests,
+        .decode_ready    = stats.decode_ready_requests,
+        .waiting         = stats.waiting_requests,
+        .materializing   = stats.materializing_requests,
+        .speculative     = options.speculative.backend != ninfer::SpeculativeBackend::None,
+    };
+}
+
+std::string render_slots_json(const ExecutorGauges& gauges,
+                              const std::vector<InFlightRequest>& in_flight) {
+    // The executor owns how many lanes are occupied; it does not publish which request sits on
+    // which lane. Admission is bounded FIFO without preemption, so the `running` oldest accepted
+    // requests are exactly the lane-resident ones, and the remainder is the pending tail.
+    const std::size_t resident =
+        std::min<std::size_t>(in_flight.size(), std::min(gauges.running, gauges.max_concurrency));
+
+    Json slots = Json::array();
+    for (std::uint32_t lane = 0; lane < gauges.max_concurrency; ++lane) {
+        const bool occupied = lane < resident;
+        Json slot{{"id", lane},
+                  {"state", occupied ? "processing" : "idle"},
+                  {"n_ctx", gauges.max_context},
+                  {"speculative", gauges.speculative}};
+        if (occupied) {
+            const InFlightRequest& request = in_flight[lane];
+            slot["request_id"]             = request.request_id;
+            slot["protocol"]               = request.protocol;
+            slot["model"]                  = request.model;
+            slot["n_prompt_tokens"]        = request.prompt_tokens;
+            slot["elapsed_seconds"]        = request.elapsed_seconds;
+        } else {
+            slot["request_id"]      = nullptr;
+            slot["n_prompt_tokens"] = 0;
+        }
+        slots.push_back(std::move(slot));
+    }
+
+    Json pending = Json::array();
+    for (std::size_t index = resident; index < in_flight.size(); ++index) {
+        const InFlightRequest& request = in_flight[index];
+        pending.push_back(Json{{"request_id", request.request_id},
+                               {"protocol", request.protocol},
+                               {"model", request.model},
+                               {"n_prompt_tokens", request.prompt_tokens},
+                               {"elapsed_seconds", request.elapsed_seconds}});
+    }
+
+    return Json{{"slots", std::move(slots)},
+                {"pending", std::move(pending)},
+                {"requests_processing", resident},
+                {"requests_deferred", in_flight.size() - resident}}
+        .dump();
+}
+
+void ServeMetrics::begin_request(const RequestLogContext& context) {
+    const std::lock_guard lock(mutex_);
+    in_flight_[context.id] = InFlightEntry{
+        .protocol      = context.protocol,
+        .model         = context.model,
+        .prompt_tokens = context.prompt_tokens,
+        .started       = std::chrono::steady_clock::now(),
+    };
+}
+
+void ServeMetrics::end_request(std::uint64_t request_id) {
+    const std::lock_guard lock(mutex_);
+    in_flight_.erase(request_id);
+}
+
+std::vector<InFlightRequest> ServeMetrics::in_flight_snapshot() const {
+    const auto now = std::chrono::steady_clock::now();
+    const std::lock_guard lock(mutex_);
+    std::vector<InFlightRequest> snapshot;
+    snapshot.reserve(in_flight_.size());
+    for (const auto& [request_id, entry] : in_flight_) {
+        snapshot.push_back(InFlightRequest{
+            .request_id      = request_id,
+            .protocol        = entry.protocol,
+            .model           = entry.model,
+            .prompt_tokens   = entry.prompt_tokens,
+            .elapsed_seconds = std::chrono::duration<double>(now - entry.started).count(),
+        });
+    }
+    return snapshot;
+}
 
 void ServeMetrics::record_done(const GenerationOutcome& outcome) {
     const GenerationMetrics& metrics = outcome.metrics;
@@ -109,7 +216,7 @@ void ServeMetrics::record_rejected() {
     ++requests_failed_total_;
 }
 
-std::string ServeMetrics::render() const {
+std::string ServeMetrics::render(const ExecutorGauges& gauges) const {
     const std::lock_guard lock(mutex_);
     std::string out;
     out.reserve(2048);
@@ -123,6 +230,11 @@ std::string ServeMetrics::render() const {
     append_sample(out, kPrefixCacheHits, prefix_cache_hit_tokens_total_);
     append_sample(out, kDraftTokens, speculative_draft_tokens_total_);
     append_sample(out, kDraftAccepted, speculative_accepted_tokens_total_);
+    append_sample(out, kProcessing, static_cast<std::uint64_t>(gauges.running));
+    append_sample(out, kDeferred, static_cast<std::uint64_t>(gauges.waiting));
+    append_sample(out, kPrefilling, static_cast<std::uint64_t>(gauges.prefilling));
+    append_sample(out, kDecodeReady, static_cast<std::uint64_t>(gauges.decode_ready));
+    append_sample(out, kMaterializing, static_cast<std::uint64_t>(gauges.materializing));
     return out;
 }
 

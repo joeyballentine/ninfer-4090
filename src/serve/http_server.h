@@ -87,8 +87,11 @@ private:
     void handle_response_cancel(const httplib::Request& req, httplib::Response& res);
     void handle_response_compact(const httplib::Request& req, httplib::Response& res);
     void handle_metrics(const httplib::Request& req, httplib::Response& res) const;
+    void handle_slots(const httplib::Request& req, httplib::Response& res) const;
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
+
+    [[nodiscard]] ExecutorGauges executor_gauges() const;
 
     void record_request_start(const RequestLogContext& context);
     void record_request_rejected(const RequestRejectionLogContext& context);

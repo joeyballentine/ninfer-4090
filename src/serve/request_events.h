@@ -15,6 +15,7 @@ struct RequestLogContext {
     std::string protocol;
     std::string model;
     bool stream                             = false;
+    int prompt_tokens                       = 0;
     std::size_t message_count               = 0;
     std::size_t media_item_count            = 0;
     int requested_output_tokens             = 0;
