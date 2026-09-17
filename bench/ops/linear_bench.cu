@@ -5,6 +5,8 @@
 //   ./build/bench/ninfer_linear_bench --qtype q4 --n 4096 --k 5120 --sweep 1:32:1
 //   ./build/bench/ninfer_linear_bench --qtype fp8 --policy a8 --n 14336 --k 5120 --t 1
 //   ./build/bench/ninfer_linear_bench --suite qwen3_6_27b
+//   ./build/bench/ninfer_linear_bench --suite ada_fp8_prefill --prefill-a8 off
+//   ./build/bench/ninfer_linear_bench --suite ada_fp8_prefill --prefill-a8 fp8
 //   ncu --profile-from-start off ./build/bench/ninfer_linear_bench \
 //       --qtype q4 --n 4096 --k 5120 --t 8 --profile
 
@@ -54,6 +56,7 @@ constexpr int kDefaultRepeat                      = 20;
 enum class TClass : std::uint8_t {
     Continuous,
     VisionStep4,
+    Prefill,
 };
 
 struct SuiteEntry {
@@ -79,6 +82,21 @@ constexpr SuiteEntry kQwen27bEntries[] = {
     {"27b.vision_fc2", QType::Q5_G64_FP16, 1152, 4304, TClass::VisionStep4},
     {"27b.vision_merger_fc1", QType::Q8_G32_FP16, 4608, 4608, TClass::VisionStep4},
     {"27b.vision_merger_fc2", QType::Q8_G32_FP16, 5120, 4608, TClass::VisionStep4},
+};
+
+// The 27B prefill projections for which the sm_89 FP8 prefill family registers a route. Run the
+// suite once with --prefill-a8 off and once with --prefill-a8 fp8 to compare the BF16 MMA route
+// against the E4M3 route on identical shapes, extents, cache and timing conditions.
+constexpr SuiteEntry kAdaFp8PrefillEntries[] = {
+    {"prefill.q4_attn_out", QType::Q4_G64_FP16, 4096, 5120, TClass::Prefill},
+    {"prefill.q4_residual", QType::Q4_G64_FP16, 5120, 6144, TClass::Prefill},
+    {"prefill.q4_qkv", QType::Q4_G64_FP16, 6144, 5120, TClass::Prefill},
+    {"prefill.q4_gdn_in", QType::Q4_G64_FP16, 7168, 5120, TClass::Prefill},
+    {"prefill.q4_gate_up", QType::Q4_G64_FP16, 34816, 5120, TClass::Prefill},
+    {"prefill.q5_qkv", QType::Q5_G64_FP16, 6144, 5120, TClass::Prefill},
+    {"prefill.q5_gdn_in", QType::Q5_G64_FP16, 7168, 5120, TClass::Prefill},
+    {"prefill.q5_residual", QType::Q5_G64_FP16, 5120, 6144, TClass::Prefill},
+    {"prefill.q5_down", QType::Q5_G64_FP16, 5120, 17408, TClass::Prefill},
 };
 
 constexpr SuiteEntry kQwen35bEntries[] = {
@@ -121,6 +139,7 @@ struct Options {
     int warmup                = kDefaultWarmup;
     int repeat                = kDefaultRepeat;
     std::uint64_t flush_bytes = kDefaultFlushBytes;
+    bool prefill_a8           = false;
     std::string csv_out;
 };
 
@@ -334,9 +353,11 @@ void usage(const char* argv0) {
                  "  %s --qtype Q4|Q5|Q6|Q8|BF16|NVFP4|FP8 --n N --k K --t T [options]\n"
                  "  %s --qtype Q4|Q5|Q6|Q8|BF16|NVFP4|FP8 --n N --k K --sweep START:END[:STEP] "
                  "[options]\n"
-                 "  %s --suite qwen3_6_27b|qwen3_6_35b_a3b|all [options]\n\n"
+                 "  %s --suite qwen3_6_27b|qwen3_6_35b_a3b|ada_fp8_prefill|all [options]\n\n"
                  "Options:\n"
                  "  --policy a16|a8|a4 Activation-compute policy (default a16).\n"
+                 "  --prefill-a8 MODE  fp8 or off (default off): admit the sm_89 E4M3 prefill\n"
+                 "                     routes of the groupwise formats under an a8/a4 policy.\n"
                  "  --execution MODE   eager (default) or graph; time the complete Op.\n"
                  "  --graph-calls N    Calls per timed graph (1..64, default 1); report per call.\n"
                  "  --profile          Capture exactly one post-warmup public Linear call.\n"
@@ -373,6 +394,15 @@ Options parse_args(int argc, char** argv) {
         } else if (arg == "--sweep") {
             opt.sweep      = parse_sweep(next("sweep"));
             opt.have_sweep = true;
+        } else if (arg == "--prefill-a8") {
+            const std::string mode = lower(next("prefill-a8"));
+            if (mode == "fp8") {
+                opt.prefill_a8 = true;
+            } else if (mode == "off") {
+                opt.prefill_a8 = false;
+            } else {
+                throw std::invalid_argument("--prefill-a8 must be fp8 or off");
+            }
         } else if (arg == "--suite") {
             opt.suite      = lower(next("suite"));
             opt.have_suite = true;
@@ -413,8 +443,10 @@ Options parse_args(int argc, char** argv) {
         throw std::invalid_argument("--t and --sweep are mutually exclusive");
     }
     if (opt.have_suite) {
-        if (opt.suite != "qwen3_6_27b" && opt.suite != "qwen3_6_35b_a3b" && opt.suite != "all") {
-            throw std::invalid_argument("--suite must be qwen3_6_27b, qwen3_6_35b_a3b, or all");
+        if (opt.suite != "qwen3_6_27b" && opt.suite != "qwen3_6_35b_a3b" &&
+            opt.suite != "ada_fp8_prefill" && opt.suite != "all") {
+            throw std::invalid_argument(
+                "--suite must be qwen3_6_27b, qwen3_6_35b_a3b, ada_fp8_prefill, or all");
         }
         if (opt.have_qtype || opt.have_n || opt.have_k || opt.have_t || opt.have_sweep) {
             throw std::invalid_argument("--suite cannot be combined with an explicit point");
@@ -440,6 +472,9 @@ Options parse_args(int argc, char** argv) {
 const std::vector<std::int32_t>& default_t_values(TClass t_class) {
     static const std::vector<std::int32_t> continuous{1, 16, 128, 1024};
     static const std::vector<std::int32_t> vision{4, 128, 1024};
+    // The route boundary and the two prefill anchors.
+    static const std::vector<std::int32_t> prefill{128, 512, 2048};
+    if (t_class == TClass::Prefill) { return prefill; }
     return t_class == TClass::Continuous ? continuous : vision;
 }
 
@@ -473,9 +508,24 @@ void append_suite(std::vector<BenchPoint>& points, const SuiteEntry (&entries)[N
     }
 }
 
+template <std::size_t N>
+void append_a8_suite(std::vector<BenchPoint>& points, const SuiteEntry (&entries)[N]) {
+    for (const SuiteEntry& entry : entries) {
+        for (const std::int32_t t : default_t_values(entry.t_class)) {
+            append_point(
+                points,
+                {entry.qtype, LinearPolicy::AllowA8, entry.n, entry.k, t, {entry.label}, false});
+        }
+    }
+}
+
 std::vector<BenchPoint> expand_points(const Options& opt) {
     std::vector<BenchPoint> points;
     if (opt.have_suite) {
+        if (opt.suite == "ada_fp8_prefill") {
+            append_a8_suite(points, kAdaFp8PrefillEntries);
+            return points;
+        }
         if (opt.suite == "qwen3_6_27b" || opt.suite == "all") {
             append_suite(points, kQwen27bEntries);
         }
@@ -771,6 +821,7 @@ void print_header(const Options& opt) {
     std::printf("# dense_fp8_tensor_tflops fp16_acc=%.1f fp32_acc=%.1f\n",
                 kRtx5090Fp8Fp16AccumulateTFLOPs, kRtx5090Fp8Fp32AccumulateTFLOPs);
     std::printf("# dense_bf16_tensor_tflops fp32_acc=%.1f\n", kRtx5090Bf16Fp32AccumulateTFLOPs);
+    std::printf("# prefill_a8=%s\n", opt.prefill_a8 ? "fp8" : "off");
 }
 
 void print_results(const std::vector<Result>& results) {
@@ -860,6 +911,7 @@ void write_csv(const std::filesystem::path& path, const std::vector<Result>& res
 int main(int argc, char** argv) {
     try {
         const Options opt = parse_args(argc, argv);
+        ninfer::ops::set_prefill_a8_routes_enabled(opt.prefill_a8);
         int device_count  = 0;
         if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
             std::printf("SKIP: no usable CUDA device\n");

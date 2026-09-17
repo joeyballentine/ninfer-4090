@@ -12,6 +12,14 @@ ninfer_add_op_test(ninfer_linear_q5_a16_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_q5_a16.cpp"
   LIBRARIES ninfer_linear_test_support)
 
+ninfer_add_op_test(ninfer_linear_q4_a8_prefill_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_q4_a8_prefill.cpp"
+  LIBRARIES ninfer_linear_test_support)
+
+ninfer_add_op_test(ninfer_linear_q5_a8_prefill_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_q5_a8_prefill.cpp"
+  LIBRARIES ninfer_linear_test_support)
+
 ninfer_add_op_test(ninfer_linear_q6_a16_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_q6_a16.cpp"
   LIBRARIES ninfer_linear_test_support)

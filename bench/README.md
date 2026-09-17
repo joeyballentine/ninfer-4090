@@ -180,7 +180,11 @@ and is not a runtime input.
 `ninfer_linear_bench` measures only the public pure `linear()` contract. It supports Q4, Q5, Q6,
 Q8, registered BF16 weights, the registered NVFP4 problems, and the registered FP8 problems.
 Existing formats use `--policy a16`; NVFP4 additionally supports `--policy a4`, and
-FP8 supports `--policy a8`. Each permission lets the production resolver select the qualified
+FP8 supports `--policy a8`. On an sm_89 build, `--prefill-a8 fp8` additionally admits the E4M3
+prefill routes of Q4 and Q5 under an `a8`/`a4` policy; `--suite ada_fp8_prefill` runs the
+registered prefill geometries at T = 128, 512 and 2048, so running it once with `--prefill-a8 off`
+and once with `--prefill-a8 fp8` compares the BF16 MMA route against the E4M3 route under the same
+inputs, cache and timing conditions. Each permission lets the production resolver select the qualified
 route for the exact geometry and T. LinearAdd, LinearSwiGLU,
 LinearPair, Attention/GDN projections, and sparse MoE remain separate semantic Ops and are not
 benchmark modes here.
@@ -205,6 +209,10 @@ cmake --build build --parallel --target ninfer_linear_bench
   --qtype fp8 --policy a8 --n 14336 --k 5120 --t 1
 ./build/bench/ninfer_linear_bench \
   --qtype fp8 --policy a8 --n 16384 --k 5120 --t 1024
+./build/bench/ninfer_linear_bench \
+  --suite ada_fp8_prefill --prefill-a8 off --csv-out profiles/bench/prefill_bf16.csv
+./build/bench/ninfer_linear_bench \
+  --suite ada_fp8_prefill --prefill-a8 fp8 --csv-out profiles/bench/prefill_a8.csv
 ```
 
 Linear tuning measures every valid T through 128 and the two bulk anchors, 512 and 1024.
