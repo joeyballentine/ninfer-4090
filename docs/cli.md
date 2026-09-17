@@ -162,9 +162,11 @@ long-decode, and long-context inputs.
 
 ## Speculative decoding
 
-Speculative decoding is disabled by default. Select MTP with one to five draft positions, or the
-35B-A3B DFlash or Qwen3.8-27B DFlash2 backend with one to fifteen. Both masked-draft backends
-may be combined with `--vision`.
+Speculative decoding is disabled by default. Select MTP, the 35B-A3B DFlash backend or the
+Qwen3.8-27B DFlash2 backend, each with one to fifteen draft positions. Every backend verifies its
+K+1 draft columns in one batched attention call, which admits at most sixteen columns per row, so
+fifteen is the deepest window for all three. Both masked-draft backends may be combined with
+`--vision`.
 `--lm-head-draft` selects the optimized proposal head and requires a selected backend:
 
 ```bash
@@ -176,6 +178,14 @@ may be combined with `--vision`.
   --spec mtp --draft-tokens 3 \
   --lm-head-draft
 ```
+
+MTP additionally drafts by prompt lookup, with no extra weights, memory or options. When a round
+starts without a proposal from the MTP head (the first round after prefill, or after every draft
+of the previous round was rejected), the Program looks for the most recent earlier occurrence of
+the sequence's current tail in its own committed tokens, trying n-gram orders five, four and three,
+longest order first, and drafts the tokens that followed that occurrence. The target verifies the
+draft exactly like any other, so acceptance stays exact. It pays off when the output repeats the
+prompt or itself, which is common in code editing and structured output.
 
 For DFlash:
 
@@ -214,7 +224,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
 | `--kv-dtype rk4v4\|rk4v4-e8` | rotated 4-bit keys and 4-bit values; `rk4v4-e8` projects the rotated keys onto the E8 Conway-Sloane lattice; sm_89 builds only | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
+| `--draft-tokens N` | MTP `1..15`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |

@@ -777,7 +777,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
 | `--kv-dtype rk4v4\|rk4v4-e8` | rotated 4-bit keys and 4-bit values; `rk4v4-e8` projects the rotated keys onto the E8 Conway-Sloane lattice; sm_89 builds only | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
+| `--draft-tokens N` | MTP `1..15`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
@@ -997,6 +997,14 @@ in rendered-token identity and exact-prefix selection.
 An appended mid-conversation system message is an ordinary prompt suffix, so an unchanged prior
 history remains eligible for `private_endpoint`. If the client modifies, removes, or moves a
 historical system message, the token prefix genuinely differs and a miss/reset is correct.
+
+`--spec mtp` also drafts by prompt lookup, with no extra weights, memory or request options. When
+a round starts without a proposal from the MTP head (the first round after prefill, or after every
+draft of the previous round was rejected), the Program looks for the most recent earlier occurrence
+of the sequence's current tail in its own committed tokens, trying n-gram orders five, four and
+three, longest order first, and drafts the tokens that followed that occurrence. The target
+verifies it exactly like any other draft; accepted tokens and the speculative counters keep their
+existing meaning.
 
 Speculative backends preserve protocol output shapes, stop behavior, and usage accounting. If a stop
 truncates a multi-token MTP, DFlash or DFlash2 round, the Engine commits the exact accepted target prefix so

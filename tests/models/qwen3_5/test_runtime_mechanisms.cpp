@@ -1,6 +1,7 @@
 #include "core/layout.h"
 #include "models/qwen3_5/state/decoder_state.h"
 #include "models/qwen3_5/program/speculative/mtp_alignment.h"
+#include "models/qwen3_5/program/speculative/prompt_lookup.h"
 #include "models/qwen3_5/program/round_buffers.h"
 #include "models/qwen3_5/program/vision_control.h"
 
@@ -157,6 +158,19 @@ void test_round_layout() {
     expect(round.mtp_decode.has_value() && round.mtp_decode->alignment_ids.shape[0] == 6 &&
                round.mtp_decode->alignment_ids.shape[1] == 1,
            "MTP decode frame is explicit");
+
+    ninfer::LayoutBuilder deep_builder;
+    q36::RoundStateLayout deep_mtp = q36::begin_round_state_layout(
+        deep_builder, q36::RoundStateSpec{.hidden       = 32,
+                                          .output_rows  = 128,
+                                          .draft_window = 15,
+                                          .backend      = ninfer::SpeculativeBackend::Mtp});
+    q36::complete_round_state_layout(deep_builder, deep_mtp);
+    (void)deep_builder.finish(256);
+    expect(deep_mtp.mtp.has_value() && deep_mtp.mtp->draft_tokens.shape[0] == 15 &&
+               deep_mtp.mtp_decode.has_value() &&
+               deep_mtp.mtp_decode->alignment_ids.shape[0] == 16,
+           "K=15 MTP frames bind the full sixteen-column verify width");
 
     ninfer::LayoutBuilder speculative_builder;
     q36::RoundStateLayout dflash = q36::begin_round_state_layout(
@@ -413,12 +427,50 @@ void test_rebuild_work_prompt_frontier_boundary() {
            "continuation growth did not preserve the prompt-frontier rebuild split");
 }
 
+std::vector<ninfer::TokenId> lookup_tokens(const std::vector<ninfer::TokenId>& ledger,
+                                           std::uint32_t draft_window) {
+    const q36::PromptLookupDraft draft = q36::find_prompt_lookup_draft(ledger, draft_window);
+    return std::vector<ninfer::TokenId>(draft.tokens.begin(),
+                                        draft.tokens.begin() + draft.count);
+}
+
+void test_prompt_lookup() {
+    using Tokens = std::vector<ninfer::TokenId>;
+    expect(lookup_tokens({10, 11, 12, 13, 14, 15, 16, 17}, 5).empty(),
+           "prompt lookup drafted from a history without a repeated n-gram");
+    expect(lookup_tokens({10, 11, 12, 10, 11}, 5).empty(),
+           "prompt lookup drafted from a history too short to carry a disjoint match");
+    expect(lookup_tokens({10, 11, 12, 20, 21, 22, 10, 11, 12}, 0).empty(),
+           "prompt lookup ignored an empty draft window");
+
+    // The only match is the leading 3-gram; the draft is its continuation, cut to the window.
+    expect(lookup_tokens({10, 11, 12, 20, 21, 22, 10, 11, 12}, 5) == Tokens({20, 21, 22, 10, 11}),
+           "prompt lookup did not copy the continuation of the matched 3-gram");
+    expect(lookup_tokens({10, 11, 12, 20, 21, 22, 10, 11, 12}, 2) == Tokens({20, 21}),
+           "prompt lookup exceeded the configured draft window");
+
+    // A 5-gram match wins over a more recent 3-gram match.
+    expect(lookup_tokens({1, 2, 3, 4, 5, 100, 7, 3, 4, 5, 200, 1, 2, 3, 4, 5}, 5) ==
+               Tokens({100, 7, 3, 4, 5}),
+           "prompt lookup preferred a recent short match over a long one");
+
+    // Two matches of the same order: the most recent occurrence wins.
+    expect(lookup_tokens({5, 6, 7, 88, 41, 42, 5, 6, 7, 99, 43, 44, 5, 6, 7}, 5) ==
+               Tokens({99, 43, 44, 5, 6}),
+           "prompt lookup did not prefer the most recent match of equal order");
+
+    // A match near the end yields fewer tokens than the window allows.
+    expect(lookup_tokens({1, 2, 3, 4, 1, 2, 3, 4}, 5) == Tokens({1, 2, 3, 4}),
+           "prompt lookup drafted past the end of the history");
+}
+
 } // namespace
 
 int main() {
     test_decoder_layout();
     test_round_layout();
     test_mtp_alignment();
+    test_prompt_lookup();
     test_vision_control();
     test_prefix_identity();
     test_rebuild_work_prompt_frontier_boundary();
