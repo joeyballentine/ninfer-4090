@@ -112,29 +112,35 @@ PromptCacheTransferPort::build_snapshot(const SnapshotRequest& request) {
     if (main_pages == 0) { return std::nullopt; }
     snapshot.sources.reserve(static_cast<std::size_t>(main_pages) +
                              static_cast<std::size_t>(backend_pages) * backend_record_pages_);
-    const bool collected =
-        collect_pages(*program_.text_kv_addresses, *program_.text_kv_pages, request.text,
-                      request.frontier, page_bytes_, snapshot.pinned_text_pages,
-                      snapshot.sources) &&
-        (backend_pages == 0 ||
-         (request.backend != nullptr && program_.backend_kv_pages != nullptr &&
-          collect_pages(*program_.backend_kv_addresses, *program_.backend_kv_pages,
-                        *request.backend, request.backend_frontier, backend_page_bytes_,
-                        snapshot.pinned_backend_pages, snapshot.sources)));
-    if (!collected) {
+    // Anything that throws here has to unwind the pins already taken, or the checkpoint stays
+    // pinned for the rest of the process and the planner can never move or evict it again.
+    const std::byte* state_image = nullptr;
+    try {
+        const bool collected =
+            collect_pages(*program_.text_kv_addresses, *program_.text_kv_pages, request.text,
+                          request.frontier, page_bytes_, snapshot.pinned_text_pages,
+                          snapshot.sources) &&
+            (backend_pages == 0 ||
+             (request.backend != nullptr && program_.backend_kv_pages != nullptr &&
+              collect_pages(*program_.backend_kv_addresses, *program_.backend_kv_pages,
+                            *request.backend, request.backend_frontier, backend_page_bytes_,
+                            snapshot.pinned_backend_pages, snapshot.sources)));
+        if (collected) {
+            const qwen3_5::HostStateImageConstView state =
+                program_.state_store->host_view(request.state);
+            if (state.data != nullptr && state.layout != nullptr &&
+                state.layout->image_bytes == state_image_bytes_) {
+                program_.state_store->pin_host_source(request.state);
+                state_image = state.data;
+            }
+        }
+    } catch (const std::exception&) { state_image = nullptr; }
+    if (state_image == nullptr) {
         release_snapshot(snapshot);
         return std::nullopt;
     }
-
-    const qwen3_5::HostStateImageConstView state = program_.state_store->host_view(request.state);
-    if (state.data == nullptr || state.layout == nullptr ||
-        state.layout->image_bytes != state_image_bytes_) {
-        release_snapshot(snapshot);
-        return std::nullopt;
-    }
-    program_.state_store->pin_host_source(request.state);
     snapshot.state       = request.state;
-    snapshot.state_image = state.data;
+    snapshot.state_image = state_image;
     snapshot.state_bytes =
         static_cast<std::uint32_t>(sizeof(PromptCacheRecordHeader)) + state_image_bytes_;
     snapshot.header = PromptCacheRecordHeader{
