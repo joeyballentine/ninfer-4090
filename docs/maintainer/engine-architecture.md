@@ -329,6 +329,7 @@ Session key 只是查找提示，不拥有 continuation。每个请求进入 Eng
 
 一个 worker boundary 按语义顺序处理：
 
+0. 释放 disk tier 已经写完的 capture 所钉住的 Host replica（仅在 `--prompt-cache` 下存在）；
 1. 接收等待请求的 timeout 或 cancellation；
 2. 推进已经开始的 resource transition；
 3. 完成可以结算的 TerminalPending 请求；
@@ -338,6 +339,12 @@ Session key 只是查找提示，不拥有 continuation。每个请求进入 Eng
 7. 运行至多一个模型 execution unit；
 8. 提交模型、预算和 Frontend 输出状态；
 9. 发布 response event 与观测。
+
+`EngineCore` 在 worker 线程启动之前构造 `ContextDiskTier`，因此打不开的 store 直接让 Engine 构造
+失败，而不是稍后静默停用自己。析构顺序是固定的：先 join worker，再
+`attach_disk_tier(nullptr, {})` 断开，再析构 tier（它 join 自己的 I/O 线程，写到一半的 record 写完
+并发布，尚未开始的 spill 通过 `drop_capture` 退回），最后才释放这些 capture 钉住的 Host replica；
+Program 比三者都活得久，所以 I/O 线程永远不会读到已经释放的 pinned host 内存。
 
 具体循环拆分可以变化，但以下顺序不能变化：
 
@@ -574,7 +581,8 @@ checkpoint catalog。
 | 实例构造与有效期 | `src/runtime/engine/model_instance.*` |
 | ResourceManager 与 materialization planner | `src/runtime/engine/context_cache/` |
 | 持久 prompt cache（store、journal、LRU、tier） | `src/runtime/engine/context_cache/context_disk_store.*`, `context_disk_tier.*`, `src/core/positional_file.*` |
-| prompt cache signature 与 transfer port | `src/models/qwen3_5/program/context_cache_signature.*` |
+| prompt cache signature 与 transfer port | `src/models/qwen3_5/program/context_cache_signature.*`, `prompt_cache_port.*` |
+| prompt cache 与 Program 之间的共享类型 | `src/runtime/contract/context_disk.h` |
 | 请求、执行、资源与计时合同 | `src/runtime/contract/` |
 | 模型 config、绑定与只读数据 | `src/models/qwen3_5/config.*`, `load/`, `model.*` |
 | 原生参数与固定模型调用 | `src/models/qwen3_5/execution/` |

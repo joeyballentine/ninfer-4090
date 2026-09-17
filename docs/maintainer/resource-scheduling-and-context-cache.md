@@ -444,17 +444,26 @@ identity_tag），与 §4.5 exact identity 使用同一份内容索引。store h
 signature；signature 不同的 store 被整体丢弃而不是部分信任，因为匹配它的任何一条 record 都会恢复出语义
 错误的状态。
 
-**Hook (a) — spill。** 两个触发点。Victim owner 在 `apply_private_action` / `apply_shared_action` 被
-evict 时提交一次；但 victim 被 apply 时其 pages 可能已经释放，所以真正承载的是 terminal publication 处的
-write-behind：checkpoint 刚进入 catalog 就提交，等到该 host slot 之后被 evict 时磁盘副本已经存在。
-Device-only checkpoint 从不提交，回读会与 decode round 争用同一条 transfer stream。
-提交只是入队；写入在专用 I/O 线程上按 batch 进行，decode round 不被阻塞。
+**Hook (a) — spill。** 三个触发点，都在 owner 仍然持有自己字节的时刻：private continuation 的
+terminal publication（write-behind：checkpoint 刚进入 catalog 就提交）、shared prefix 的 publication
+（跨进程最值得保留的就是它），以及 pressure 把一个 **保留下来的** private owner 降级之后——那正是
+一个 checkpoint 第一次变成 host-resident 的时刻，也是它被 evict 之前字节还在的最后时刻。
+被 evict 的 victim **不**提交：`apply_private_action` 看到 `VictimDisposition::Evicted` 时 Program
+已经释放了它的 replica，没有任何东西可以 capture。
+
+提交前先向 Program 要一次 capture：`Program::prepare_prompt_cache_capture(owner, checkpoint)` 在
+Engine worker 上检查该 checkpoint 的 State image 与全部 KV page 是否都已经 host-resident，把它们
+钉住，并返回这次 spill 的 token；返回 disengaged 表示不可 capture（最常见的原因是 KV 页仍然
+Device-only），该次 offer 被丢弃。Device-only 的副本要回读就得占用 decode round 正在用的 transfer
+stream，这正是 §5.3 开头拒绝它的理由。提交本身只是入队；写入在专用 I/O 线程上按 batch 进行，
+decode round 不被阻塞。
 
 **Hook (b) — lookup。** 在 candidate 枚举之前执行，而不是之后。只有当 disk index 中某个 frontier 长于
 任何 resident 候选时才探测；命中则 restore 并装入一个 **空闲** catalog slot，随后按普通 resident source
 参与 §7 的 target 搜索与定价，只有未覆盖的后缀进入 prefill。不会为此驱逐 resident owner：那等于用未经
 验证的 disk source 换掉已证明可用的内存 source。把恢复出的字节变成 continuation 是 Program 的职责，
-ResourceManager 通过 Engine 提供的 adoption 回调完成这一步。
+ResourceManager 通过 Engine 提供的 adoption 回调完成这一步；回调未设置时整个 hook 直接返回 false，
+一次文件读都不会发生（见下面的“当前状态”）。
 
 **Hook (c) — startup。** store 打开时重放 journal，重建 record 与 extent 索引。没有启动期扫描或压缩，
 因此启动代价与 record 数量成正比而与 pool 体积无关。
@@ -476,9 +485,6 @@ mark-and-sweep 压缩回收；压缩同时受 dead extent 数、dead 字节和�
 多 GB 的 pool。压缩在 I/O 线程上进行，复制阶段不持 index 锁，只在最后的文件交换时短暂持有，因此不阻塞
 executor；复制阶段可以被新到达的请求取消，此时活动 store 完全未被触碰。
 
-**批量。** 一条 record 的 page 数可达上千，整份 staging 会在 24 GB 级显卡上直接 OOM。spill 与 restore
-都按 `ContextDiskTransferPort::batch_pages()` 分批，tier 同时持有的 page 不超过一批。
-
 **Signature 组成。** store header 的 signature 由 Program 组成（`context_cache_signature.*`），因为
 只有模型知道哪些事实会改变一页字节的含义。`Program::context_cache_signature(artifact_identity)` 取
 Engine 在装载时已经算出的 `LoadSummary::prefill_signature` 作为 artifact 半边（它包含架构、config 解释
@@ -498,41 +504,56 @@ Engine 在装载时已经算出的 `LoadSummary::prefill_signature` 作为 artif
 字符串并互相匹配对方的 record。整串只使用目录名可以原样保留的字符，所以 store 目录名不会把两个不同
 的 signature 折叠成同一个目录。
 
-**当前状态。** store、journal、LRU、压缩、取消、options 解析、signature 组成与 stats 已经就位；
-capture 一侧的 port 按上面的快照模型实现。把一条恢复出来的 record 变成 catalog 里的 continuation
-仍然缺一个 Program 事务：`KVAddressSpaceStore` 只能在 active address space 上 `ensure_mapped_to_tokens`
-并 `commit_frontier`，没有从既有页直接装配一个 inactive address space 的入口，而 continuation 还需要
-ledger、`ResidentPrefixIdentity`、rope delta 与 execution frontier 才能通过 exact verification。因此
-record 的 State image 除了 pinned StateImage 负载之外还要带一个 Program 自己定义的头部（ledger、
-prefix identity、frontier），`ContextDiskStore` 对此保持 payload-agnostic。在该事务落地之前，
-`ResourceManager::attach_disk_tier` 的 adoption 回调返回 disengaged，命中的 record 被释放、请求回退到
-prefill。
+**当前状态。** store、journal、LRU、压缩、取消、options 解析、signature 组成、stats，以及
+transfer port 的 capture 与 restore 两侧都已经就位；`--prompt-cache` 会真的把 record 写到磁盘并在
+下次进程启动时重放出来。**尚未就位的是 adoption**：把一条恢复出来的 record 变成 catalog 里的
+continuation 还缺一个 Program 事务。`KVAddressSpaceStore` 只能在 active address space 上
+`ensure_mapped_to_tokens` 并 `commit_frontier`，没有从既有页直接装配一个 inactive address space 的
+入口，而 continuation 还需要 ledger、`ResidentPrefixIdentity`、rope delta 与 execution frontier 才能
+通过 exact verification。因此 `EngineCore` 目前把 `attach_disk_tier` 的 adoption 回调留空，
+`ResourceManager::restore_from_disk_tier` 因此直接返回 false，hook (b) 不会发起任何文件读——读回一条
+没有东西能消费的 record 只会白花 I/O。record 的 state image 已经带上一个 Program 自己定义的头部
+（几何、frontier、rope delta、checkpoint 种类），`ContextDiskStore` 对此保持 payload-agnostic；
+adoption 落地时该头部提升版本号并补上 ledger 与 prefix identity。
 
-**Transfer port 的线程契约。** `ContextDiskTier` 自带 I/O 线程，`begin_capture` / `capture_pages` /
-`capture_state_image` / `end_capture` 都在该线程上运行，与 Engine worker 的 decode round 并发；而
-`lookup` / `restore` 运行在调用线程，也就是 Engine worker 自己。ProgramImpl 是单 mutation owner
-（见 [Engine 架构](engine-architecture.md#51-单一-mutation-owner)），不是线程安全的，所以 port 的
-capture 一侧**不能**在 I/O 线程上触碰 ProgramImpl：
+**Transfer port 的线程契约。** 接口在 `runtime/contract/context_disk.h`，实现在
+`models/qwen3_5/program/prompt_cache_port.*`——模型层不 include Engine 头文件，Engine 也不知道一页
+里装的是什么。`ContextDiskTier` 自带 I/O 线程，`begin_capture` / `capture_pages` /
+`capture_state_image` / `end_capture` / `drop_capture` 都在该线程上运行，与 Engine worker 的 decode
+round 并发；而 `lookup` / `restore` 运行在调用线程，也就是 Engine worker 自己。ProgramImpl 是单
+mutation owner（见 [Engine 架构](engine-architecture.md#51-单一-mutation-owner)），不是线程安全的，
+所以 capture 一侧**不能**在 I/O 线程上触碰 ProgramImpl：
 
-- Engine worker 在 offer 时就把 checkpoint 的 host replica（pinned Host State slot 与 Host KV
-  extent）钉住并登记成一份快照，然后才入队 spill；
-- I/O 线程上的 `begin_capture` 只是在 port 自己的互斥量下查这份快照，`capture_pages` 只是从已经
-  pinned 的 host 内存 memcpy 进 staging，不发起任何 CUDA 调用，也不修改 Program 状态；
-- `end_capture` 只标记完成，实际解钉在 Engine worker 的下一次维护步里做。
+- Engine worker 在 offer 时调用 `prepare_prompt_cache_capture`，port 用 `can_pin_host_source` 逐页
+  确认 Host replica 当前有效（content epoch 与 committed columns 都对得上），`pin_source` 钉住每一页，
+  `StateImageStore::pin_host_source` 钉住 State image，把这些 pinned 地址记成一份快照并返回 token；
+- I/O 线程上的 `begin_capture` 只是在 port 自己的互斥量下按 token 查这份快照，`capture_pages` 只是
+  从已经 pinned 的 host 内存 memcpy 进一块普通堆 staging，不发起任何 CUDA 调用，也不修改 Program 状态；
+- `end_capture` 只把快照标记成 finished；真正解钉在 Engine worker 的下一个 boundary 由
+  `release_finished_prompt_cache_captures` 完成。tier 永远不会看到的 spill（被同 key 顶掉、队列满被
+  丢、被到达的请求取消、或析构时清空队列）通过 `drop_capture` 退回，否则那份快照会永远钉着。
 
-拆除顺序由此固定：先 `attach_disk_tier(nullptr, {})` 断开，再析构 `ContextDiskTier`（它 join I/O 线程，
-正在写的 record 写完并发布，未开始的 spill 被丢弃），最后才析构 Program。反过来会让 I/O 线程读到已经
-释放的 pinned host 内存。
+钉住是安全的而不只是约定：`source_pins != 0` 让 `can_release_page_replica`、`can_dematerialize`、
+`can_release_reference`、`StateImageStore::can_release` 与 `drop_host_replica` 全部返回 false，
+而 pressure planning 本来就只通过这些谓词判定可行性，所以一个正在 spill 的 checkpoint 不会被选成
+victim，也不会在 I/O 线程脚下被搬走。
 
-由此得到一条策略：只有 **State 与 KV 都已经 host-resident** 的 checkpoint 才会被 offer。Device-only
-的副本要回读就得占用 decode round 正在用的 transfer stream，这正是 §5.3 开头拒绝它的理由；把同样的
-规则扩展到 KV 页，capture 一侧就完全不需要 transfer stream 与 event 同步。restore 一侧运行在 Engine
-worker 上，因此可以直接使用 Program 的 `cudaMemcpyAsync` + `CudaCompletionEvent` 路径把字节放进
-Host State slot 或 device 页。
+restore 一侧运行在 Engine worker 上：`begin_restore` 从 `HostStatePool` 取一个空闲 State slot、从
+`HostKVArena` 按主池 layout 取 `page_count` 页；`restore_staging` 在 page 阶段直接把这块 pinned
+arena 内存交给 tier 读入，因此一页只写一次，不经过第二块 staging；state image 阶段用一块独立的堆
+缓冲，因为它要先解析头部再落到 pinned slot 里。放到 device 时可以直接走
+`DeviceKVPagePool::copy_from_host` + `CudaCompletionEvent`（这正是 materialization 已经在用的
+H2D 路径），因为目的地本来就是 arena view。
 
-**批量与 per-layer 几何。** record 的一页是一个 page group，字节数取 `plan_host_kv_page_layout` 的
-`page_stride`；per-layer KV schedule 让每层 plane 的字节数不同，但一个 page group 覆盖所有层，所以
-`page_stride` 是唯一正确且统一的 page 字节数。绝不要用固定 page 大小推算偏移。
+**批量与 per-layer 几何。** record 的一页是一个主池 page group，字节数取
+`plan_host_kv_page_layout` 的 `page_stride`；per-layer KV schedule 让每层 plane 的字节数不同，但一个
+page group 覆盖所有层，所以 `page_stride` 是唯一正确且统一的 page 字节数。绝不要用固定 page 大小推算
+偏移。backend 池有自己的 stride，于是一个 backend page 占 `ceil(backend_stride / page_bytes)` 个
+连续 record page，尾部补零；record 的 page 流是先主池后 backend，这样两轮对话共享的主池页仍然逐字节
+相同，继续被按内容寻址去重。
+
+`batch_pages()` 取 `clamp(64 MiB / page_bytes, 1, 256)`：spill 与 restore 都按它分批，tier 同时持有
+的 page 不超过一批，port 的 capture staging 因此是一块固定大小的缓冲而不是整条 record。
 
 **DirectStorage。** Windows 上可以用 kernel-bypass DMA 跳过 pinned staging 往返。seam 声明在
 `ContextDiskTransferPort` 中并由 `_WIN32 && NINFER_DIRECTSTORAGE` 限定，本仓库不实现它（需要 Windows SDK、

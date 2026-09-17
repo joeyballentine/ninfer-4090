@@ -270,12 +270,17 @@ generated token IDs in diagnostics.
 
 One invocation serves one request, so without `--prompt-cache` nothing is retained: every run
 prefills its whole prompt. `--prompt-cache` gives the retained prefix a consumer - the next
-invocation - by writing the computed checkpoint to disk and restoring it when a later run shares
-the prefix. Only the uncovered suffix is then prefilled. This is what makes repeated runs over one
-long document or one growing conversation worth doing from the CLI at all: a restore is bounded by
-storage bandwidth, not by compute, and on the donor fork's NVMe a 152k-token checkpoint came back in
-367 ms against 162 s of cold prefill. The equivalent figure for this implementation has not been
-measured yet.
+invocation - by writing the computed checkpoint to disk, so that a later run over the same prefix
+only has to prefill the uncovered suffix. A restore is then bounded by storage bandwidth rather
+than by compute; on the donor fork's NVMe a 152k-token checkpoint came back in 367 ms against 162 s
+of cold prefill, and the equivalent figure for this implementation has not been measured yet.
+
+**The write half is what ships today.** Records are captured, published, replayed at startup,
+evicted and compacted, but reading one back into a live continuation still needs a Program
+transaction that does not exist yet, so a later run does not yet skip its prefill. Until then the
+flag builds and fills the store; see
+[资源调度与上下文缓存 §5.3](maintainer/resource-scheduling-and-context-cache.md) for what the
+remaining step is.
 
 Records carry the artifact and KV-layout signature, so changing the model, `--kv-dtype` or the
 context geometry never matches a stored record. `--prompt-cache-dir` and `--prompt-cache-max-bytes`

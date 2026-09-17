@@ -112,7 +112,7 @@ is set.
 | `ninfer:requests_prefilling` | gauge: lane-resident requests still evaluating their prompt |
 | `ninfer:requests_decode_ready` | gauge: lane-resident requests eligible for the next decode round |
 | `ninfer:requests_materializing` | gauge: requests whose model state is being materialized onto a lane |
-| `ninfer:prompt_cache_lookups_total` | disk index probes made after the Device and Host context tiers missed |
+| `ninfer:prompt_cache_lookups_total` | disk index probes made after the Device and Host context tiers missed (see the note below: zero until record adoption lands) |
 | `ninfer:prompt_cache_hits_total` | probes that matched a published record |
 | `ninfer:prompt_cache_restores_total` | records read back and adopted as a resident context source |
 | `ninfer:prompt_cache_restore_failures_total` | matched records that could not be read back or adopted |
@@ -1073,13 +1073,19 @@ Backend pool and is consumed in physical page extents. `--no-prefix-reuse` selec
 mode and cannot be combined with any of the seven explicit context-cache capacity flags, including
 zero-valued flags.
 
-`--prompt-cache` adds a third tier below those two: a checkpoint that leaves the pinned host slots
-is written to disk and can be restored by a later request, including one served by a different
-process. That is what it buys - Device and Host checkpoints do not survive a restart, and a working
-set larger than `--host-kv-mib` does not survive the host budget either, so today both cases
-re-prefill from scratch. A restore is bounded by storage bandwidth rather than by compute: on the
-donor fork's NVMe, a 152k-token checkpoint came back in 367 ms against 162 s of cold prefill. The
-equivalent figure for this implementation's portable path has not been measured yet.
+`--prompt-cache` adds a third tier below those two: a checkpoint that reaches the pinned host slots
+is written to disk, so it can outlive both the host budget and the process. That is what it is for -
+Device and Host checkpoints do not survive a restart, and a working set larger than `--host-kv-mib`
+does not survive the host budget either, so both cases otherwise re-prefill from scratch. A restore
+is bounded by storage bandwidth rather than by compute: on the donor fork's NVMe, a 152k-token
+checkpoint came back in 367 ms against 162 s of cold prefill. The equivalent figure for this
+implementation's portable path has not been measured yet.
+
+**The write half is what ships today.** Records are captured, published, replayed at startup,
+evicted and compacted, and the `prompt_cache` metrics report all of it; reading one back into a
+live continuation still needs a Program transaction that does not exist yet, so the restore
+counters stay at zero and a matching request still prefills. See
+[资源调度与上下文缓存 §5.3](maintainer/resource-scheduling-and-context-cache.md).
 
 Records are keyed by the same content identity as in-memory prefix reuse and carry the artifact and
 KV-layout signature, so a different model, KV storage or context geometry never matches one. The
