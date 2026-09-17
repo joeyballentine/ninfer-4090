@@ -202,9 +202,15 @@ URL and a year-long cache can never go stale. The documents that decide *which* 
 browser loads are revalidated instead.
 
 An unmatched `GET` that accepts `text/html` and does not begin with `/v1/`, `/health`, `/metrics`,
-`/slots` or `/props` returns the entry document, so the UI's client-side routes (for example
-`/chat/<id>`) survive a reload. Those five prefixes are never answered with HTML: an unrouted API
+`/slots` or `/props` returns the entry document, so a client-side route such as `/chat/<id>` loads
+the app instead of a bare 404. Those five prefixes are never answered with HTML: an unrouted API
 path keeps the 404 behavior documented for its protocol.
+
+One caveat about reloading a deep link. The bundled UI derives its own base URL from the document
+path, so a document served at `/chat/<id>` makes the app resolve its relative asset and API URLs
+under `/chat/`, which this server does not mount. The fallback therefore makes a deep reload load
+the shell rather than 404, but the reliable entry point is `/`, from which the UI navigates
+client-side. Upstream llama.cpp serves no fallback at all and 404s such a reload.
 
 With `--api-key` set, the static documents stay public — the UI has to load before it can ask for
 a key — while every API path, `/props` included, still requires it. The UI stores the key in the
