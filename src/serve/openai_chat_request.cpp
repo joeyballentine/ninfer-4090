@@ -131,19 +131,6 @@ void validate_standard_output_controls(const Json& body) {
         }
     }
 
-    if (body.contains("response_format") && !body.at("response_format").is_null()) {
-        const Json& format = body.at("response_format");
-        if (!format.is_object() || !format.contains("type") || !format.at("type").is_string()) {
-            bad_request("response_format must contain a string type", "response_format");
-        }
-        if (format.at("type").get<std::string>() != "text") {
-            bad_request(
-                "this response_format requires constrained output, which NInfer cannot guarantee; "
-                "only {\"type\":\"text\"} is available",
-                "response_format", "response_format_not_supported");
-        }
-    }
-
     if (body.contains("modalities") && !body.at("modalities").is_null()) {
         const Json& modalities = body.at("modalities");
         if (!modalities.is_array() || modalities.empty()) {
@@ -199,6 +186,20 @@ void validate_standard_output_controls(const Json& body) {
                 "store", "store_not_supported");
         }
     }
+}
+
+void parse_response_format(const Json& body, GenerationRequest& out) {
+    if (!body.contains("response_format") || body.at("response_format").is_null()) { return; }
+    const Json& format = body.at("response_format");
+    // Chat Completions nests the schema body one level down; an absent object still reaches the
+    // shared parser, which reports the missing members against the nested path.
+    static const Json empty = Json::object();
+    const Json& definition  = format.is_object() && format.contains("json_schema") &&
+                                     format.at("json_schema").is_object()
+                                 ? format.at("json_schema")
+                                 : empty;
+    out.response_format = parse_response_format_object(format, definition, "response_format",
+                                                       "response_format.json_schema");
 }
 
 void validate_constrained_decoding_extensions(const Json& body) {
@@ -900,6 +901,7 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     parse_messages(body, output.generation);
     parse_stop(body, output.generation);
     parse_sampling(body, output.generation);
+    parse_response_format(body, output.generation);
     parse_stream_options(body, output);
     parse_response_observations(body, output);
     parse_output_limit(body, limits, output);
@@ -909,6 +911,7 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     output.generation.preserve_thinking         = template_options.preserve_thinking;
     output.generation.chat_template_kwargs_json = template_options.kwargs_json;
     apply_openai_prompt_cache_policy(output.generation, cache_policy);
+    reject_structured_output_conflicts(output.generation);
     return output;
 }
 
