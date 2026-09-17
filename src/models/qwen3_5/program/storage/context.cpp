@@ -747,7 +747,7 @@ ProgramImpl::checkpoint_summary(const SequenceState& sequence, runtime::Checkpoi
                                                             : 0U;
     const std::uint32_t identity_tag = static_cast<std::uint32_t>(speculative_backend) |
                                        (static_cast<std::uint32_t>(proposal_head) << 8U) |
-                                       (static_cast<std::uint32_t>(kv_storage) << 16U);
+                                       (kv_storage.identity_tag() << 16U);
     return qwen3_5::CheckpointSummary{
         .ref   = checkpoint,
         .scope = runtime::CheckpointScope::Private,

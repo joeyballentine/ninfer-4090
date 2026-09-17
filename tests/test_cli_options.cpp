@@ -106,6 +106,20 @@ int main() {
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "rk4v4-e8"});
     failures += check(rk4v4_e8.kv_cache == ninfer::KvCacheStorage::RK4V4E8,
                       "--kv-dtype rk4v4-e8 did not select E8-lattice int4 KV");
+    const ninfer::cli::Options tiered =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "int8:4,rk4v4-e8"});
+    failures += check(tiered.kv_cache.head == ninfer::KvCacheStorage::Int8Group64 &&
+                          tiered.kv_cache.head_layers == 4 &&
+                          tiered.kv_cache.tail == ninfer::KvCacheStorage::RK4V4E8,
+                      "--kv-dtype X:N,Y did not select a two-tier KV schedule");
+    failures += check(rk4v4_e8.kv_cache.uniform(), "--kv-dtype X is not a uniform KV schedule");
+    for (const char* spec : {"int8:0,rk4v4-e8", "int8:4", "int8:x,rk4v4-e8", "int8:4,bogus"}) {
+        failures += check(rejects([&] {
+                              (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                           "--kv-dtype", spec});
+                          }),
+                          "CLI accepted a malformed KV schedule");
+    }
     const std::string help = ninfer::cli::usage_text("ninfer-cli");
     failures +=
         check(help.find("nvfp4") != std::string::npos && help.find("k8v4") != std::string::npos &&

@@ -45,20 +45,11 @@ std::uint64_t parse_u64(const char* text, const char* label) {
     return static_cast<std::uint64_t>(value);
 }
 
-KvCacheStorage parse_kv_dtype(const char* text) {
-    const std::string value(text);
-    if (value == "bf16") { return KvCacheStorage::BFloat16; }
-    if (value == "int8") { return KvCacheStorage::Int8Group64; }
-    if (value == "fp8") { return KvCacheStorage::Fp8E4M3Row256; }
-    if (value == "nvfp4") { return KvCacheStorage::Nvfp4Group16; }
-    if (value == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
-    // Packed int4 (port sergiuszm/ninfer-4090); solo el build sm_89 los soporta — el planner
+KvCacheSchedule parse_kv_dtype(const char* text) {
+    // `X` keeps one storage for every attention layer; `X:N,Y` gives the first N attention layers
+    // X and the rest Y. Los modos empaquetados rotados solo existen en el build sm_89 — el planner
     // rechaza el arranque en otra arquitectura (ver validate_target_options).
-    if (value == "rk4v4") { return KvCacheStorage::RotatedInt4KeyInt4ValueGroup64; }
-    if (value == "rk4v4-e8") { return KvCacheStorage::RK4V4E8; }
-    if (value == "rk8v4") { return KvCacheStorage::RotatedInt8KeyInt4ValueGroup64; }
-    if (value == "rk2v4-e8") { return KvCacheStorage::RK2V4E8; }
-    throw std::invalid_argument("invalid kv-dtype: " + value);
+    return parse_kv_cache_schedule(text);
 }
 
 PrefillA8 parse_prefill_a8(const std::string& value) {
@@ -90,7 +81,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--max-long-anchors-per-continuation N] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
-           "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] "
+           "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8[:N,<kind>]] "
            "[--prefill-a8 fp8|off] "
            "[--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
@@ -118,6 +109,8 @@ std::string serve_usage_text(const char* argv0) {
            "cylinder keys with int4 values; all require an sm_89 build\n"
            "       --prefill-a8 fp8 admits the sm_89 E4M3 prefill routes of the groupwise "
            "weights (activation quantized per token, weights exact); default off\n"
+           "       --kv-dtype X:N,Y gives the first N full-attention layers storage X and the "
+           "rest Y; N counts attention layers only\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"

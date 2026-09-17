@@ -226,6 +226,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--kv-dtype rk8v4` | Hadamard-rotated 8-bit keys and 4-bit values (400 B per token/head at head_dim 256); sm_89 builds only | `bf16` |
 | `--kv-dtype rk2v4-e8` | 2-bit E8 cylinder keys and 4-bit values (208 B per token/head at head_dim 256); sm_89 builds only | `bf16` |
 | `--prefill-a8 fp8\|off` | admit the sm_89 E4M3 prefill routes of the groupwise Q4/Q5 projections (per-token activation quantization; weights stay exact). See [Ada FP8 prefill](maintainer/ada-fp8-prefill.md) | `off` |
+| `--kv-dtype X:N,Y` | two-tier schedule: the first `N` full-attention layers use `X`, the rest use `Y`; `N` counts attention layers, not text layers, and must be below the model's full-attention layer count | uniform |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..15`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
@@ -280,7 +281,20 @@ rotated 8-dimension key sub-vector into an 8-bit index over the 240 minimal E8 r
 log-scale radius and a 4-bit residual hyperoctahedral axis, which is the smallest KV footprint
 the engine offers. Only the sm_89 attention
 and KV kernels implement the rotated modes, so startup planning rejects them on any other
-compute capability. The prepared prompt must fit
+compute capability.
+
+`--kv-dtype` also accepts a two-tier schedule, `X:N,Y`: the first `N` full-attention layers store
+their KV as `X` and the remaining ones as `Y`. `N` counts full-attention layers only. On
+Qwen3.8-27B, 16 of the 64 text layers carry a KV cache, so `--kv-dtype int8:4,rk4v4-e8` gives
+layers 0-3 of those 16 the int8 profile and layers 4-15 the rotated 4-bit one; `N` must be at
+least 1 and below the model's full-attention layer count. Every layer keeps its own physical page
+size, so the pool costs the summed per-layer bytes per token, not the largest layer's. Both kinds
+go through the same architecture check: a schedule naming any rotated mode requires an sm_89
+build. The reported KV name, in the startup log and in the `--request-log-jsonl` environment
+record, is the resolved spec string. Per-layer precision thresholds are unmeasured; compare a
+candidate schedule against the uniform kinds with
+`ninfer-perplexity <model.ninfer> --corpus <manifest.json> --kv-dtype <spec>` on the code domain
+before adopting one. The prepared prompt must fit
 `--max-context`; generation stops at the remaining context capacity when necessary.
 `--kv-capacity N` controls the shared physical Main Text KV pool independently and is rounded up to
 the 64-token page size. `--kv-capacity auto` loads the selected weights, measures the remaining GPU

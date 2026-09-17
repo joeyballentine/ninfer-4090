@@ -25,7 +25,7 @@ struct Options {
     std::uint32_t prefill_chunk  = 1024;
     int device                   = 0;
 
-    KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
+    KvCacheSchedule kv_cache = KvCacheStorage::BFloat16;
     // Private prefill activation profile; see EngineOptions::prefill_a8.
     PrefillA8 prefill_a8 = PrefillA8::Off;
     SpeculativeOptions speculative;

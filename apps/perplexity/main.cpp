@@ -47,7 +47,7 @@ struct Options {
     std::uint32_t context               = 4096;
     std::uint32_t stride                = 2048;
     int device                          = 0;
-    ninfer::KvCacheStorage kv           = ninfer::KvCacheStorage::Fp8E4M3Row256;
+    ninfer::KvCacheSchedule kv          = ninfer::KvCacheStorage::Fp8E4M3Row256;
     ninfer::PrefillA8 prefill_a8        = ninfer::PrefillA8::Off;
     bool quick                          = false;
     ninfer::product::LogLevel log_level = ninfer::product::LogLevel::Info;
@@ -57,7 +57,8 @@ std::string usage_text() {
     return "usage: ninfer-perplexity <model.ninfer> "
            "(--corpus <manifest.json> [--quick] | --text <utf8-file>)\n"
            "       [--context N] [--stride N] [--device N]\n"
-           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--prefill-a8 fp8|off]\n"
+           "       [--kv-dtype <kind>|<kind>:<attention-layers>,<kind>] "
+           "[--prefill-a8 fp8|off]\n"
            "       [--output <directory>]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n";
 }
@@ -104,20 +105,10 @@ Options parse_options(int argc, char** argv) {
         } else if (option == "--device") {
             out.device = parse_integer<int>(value("--device"), "device");
         } else if (option == "--kv-dtype") {
-            const std::string_view dtype = value("--kv-dtype");
-            if (dtype == "bf16") {
-                out.kv = ninfer::KvCacheStorage::BFloat16;
-            } else if (dtype == "int8") {
-                out.kv = ninfer::KvCacheStorage::Int8Group64;
-            } else if (dtype == "fp8") {
-                out.kv = ninfer::KvCacheStorage::Fp8E4M3Row256;
-            } else if (dtype == "nvfp4") {
-                out.kv = ninfer::KvCacheStorage::Nvfp4Group16;
-            } else if (dtype == "k8v4") {
-                out.kv = ninfer::KvCacheStorage::Fp8KeyNvfp4Value;
-            } else {
-                usage_error("--kv-dtype must be bf16, int8, fp8, nvfp4, or k8v4");
-            }
+            // One kind for every attention layer, or `X:N,Y` for the first N attention layers as
+            // X and the rest as Y. Comparing a schedule against the uniform kinds on the code
+            // domain is the evaluation protocol for a mixed-precision KV schedule.
+            out.kv = ninfer::parse_kv_cache_schedule(value("--kv-dtype"));
         } else if (option == "--prefill-a8") {
             const std::string_view profile = value("--prefill-a8");
             if (profile == "off") {
@@ -145,20 +136,8 @@ Options parse_options(int argc, char** argv) {
     return out;
 }
 
-std::string kv_name(ninfer::KvCacheStorage value) {
-    switch (value) {
-    case ninfer::KvCacheStorage::BFloat16:
-        return "bf16";
-    case ninfer::KvCacheStorage::Int8Group64:
-        return "int8-g64";
-    case ninfer::KvCacheStorage::Fp8E4M3Row256:
-        return "fp8-e4m3-r256";
-    case ninfer::KvCacheStorage::Nvfp4Group16:
-        return "nvfp4";
-    case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
-        return "k8v4";
-    }
-    throw std::logic_error("unknown KV dtype");
+std::string kv_name(const ninfer::KvCacheSchedule& value) {
+    return ninfer::kv_cache_schedule_spec(value);
 }
 
 std::string safe_component(std::string_view value) {
@@ -189,7 +168,7 @@ std::filesystem::path prepare_output_directory(const Options& options,
                                                const CorpusSelection& corpus) {
     std::filesystem::path output = options.output.value_or(
         std::filesystem::path("profiles/perplexity") / safe_component(load.model_name) /
-        safe_component(load.prefill_signature) / kv_name(options.kv) /
+        safe_component(load.prefill_signature) / safe_component(kv_name(options.kv)) /
         safe_component(corpus.corpus_id) / safe_component(corpus.mode) / timestamp());
     if (std::filesystem::exists(output)) {
         if (!std::filesystem::is_directory(output) ||

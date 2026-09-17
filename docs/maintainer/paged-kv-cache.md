@@ -88,6 +88,12 @@ FP8-E4M3FN-row256，V 固定为 NVFP4-G16。
 layer 展开该 schema 并确定 plane ordinal。Common pool implementation 仍只接收已展开的
 `KVPageGeometry`、plane inventory 和 capacity，不解释 storage mode。
 
+Main Text 的 profile 由 `KvCacheSchedule` 按 layer 选定，而不是整个 pool 一个 profile。Schedule
+要么是 uniform（一个 kind 用于全部 layers，与之前的行为逐字节相同），要么是 two-tier：前 \(N\) 个
+full-attention layer 用 `head`，其余用 `tail`。\(N\) 只计 full-attention layer，不计交错的 GDN
+layer——后者持有固定 recurrent state，从不进入 paged pool。MTP pool 跟随 text stack，使用 schedule
+的 `tail` kind；Draft Full 保持自己的 BF16 profile。详见 `4.6`。
+
 ### 3.2 Main capacity
 
 设：
@@ -323,6 +329,71 @@ Startup physical bytes 由各 plane slab 的完整 span 与 alignment 得到。�
 `P=64` 同时满足当前 32/64-key Attention tiles、128-token aligned prefill chunks、有限 block-table
 metadata 和 bounded tail slack。Prefix hit granularity不参与 page-size 选择。改变 page size、grouping
 或 closed plane order 都是架构变更。
+
+### 4.6 Per-layer schedule
+
+一个 pool 的 planes 是按 layer 展开的独立 tensors：plane \(i\) 的 slab 只由它自己的 dtype、leading
+extent、head extent 和 physical page count 决定，page group \(g\) 在每个 plane 中选择的是该 plane
+自己的 slice。因此不同 layer 可以使用不同的 closed profile，而 pool 不需要统一的 page byte size：
+
+```text
+page group g
+├── layer 0  (int8:      K code/scale + V code/scale)   slice g
+├── layer 1  (int8)                                     slice g
+├── ...
+├── layer N  (rk4v4-e8:  K code/scale + V code/scale)   slice g
+└── layer L-1 (rk4v4-e8)                                slice g
+```
+
+`paged_kv_schedule_layouts()` 把 schedule 解析为每个 layer 的 `PagedKVStorageLayout`；
+`paged_kv_page_geometry()` 把这一 per-layer schema 展开为 plane inventory。Plane ordinal 不再是固定
+stride：每个 layer 的 first plane ordinal 是前面各 layer `planes_per_layer()` 的前缀和
+（`paged_kv_plane_base()`），因为 BF16 layer 没有 scale planes 而量化 layer 有。
+
+Per-layer page payload 为：
+
+\[
+PageBytes_l=\sum_{plane\in l} PlaneBytesPerToken_l\cdot P
+\]
+
+一个 pool 的 page-group payload 是各 layer 之和，也就是 `4.5` 的 \(PageBytes\)。所有 page groups
+在同一 pool 内仍然等价：每个 group 在每个 layer 中占用该 layer 的 \(PageBytes_l\)。
+
+被拒绝的替代方案是给整个 pool 一个 layer-max 的 page byte size，让较小的 layer 浪费尾部。它会把
+mixed precision 的容量收益全部退回：在 27B（16 attention layers、head_dim 256、4 KV heads）上，
+`int8:4,rk4v4-e8` 的实际 21,504 B/token 会变成 uniform int8 的 33,792 B/token（+57%，收益归零），
+`rk8v4:8,rk2v4-e8` 的 19,456 B/token 会变成 uniform rk8v4 的 25,600 B/token（+32%，收益归零）。
+由于 pool 本来就按 plane 分配、传输和清零，per-layer page size 不增加任何机制。
+
+Storage kind 通过 `PagedKVLayerView.storage` 逐 layer 到达 Ops；append 与 attention 的 kernel 选择
+本来就是 per-call 的 host 侧决策，CUDA Graph capture 因此按 layer 记录各自的 node parameters。
+
+### 4.7 Per-layer bytes 与容量
+
+D256、4 KV heads、16 attention layers 下的每 token 池字节数：
+
+| schedule | head layers | tail layers | B/token |
+|---|---:|---:|---:|
+| `int8` | — | 16 × 2112 | 33,792 |
+| `int8:4,rk4v4-e8` | 4 × 2112 | 12 × 1088 | 21,504 |
+| `rk4v4-e8` | — | 16 × 1088 | 17,408 |
+| `rk8v4` | — | 16 × 1600 | 25,600 |
+| `rk8v4:8,rk2v4-e8` | 8 × 1600 | 8 × 832 | 19,456 |
+| `rk2v4-e8` | — | 16 × 832 | 13,312 |
+
+每 layer 每 token 的字节数是 `4.3` 表中的 per token/head 值乘以 KV heads。Capacity curve 的
+\(B_{step}\) 仍由同一 production layout builder 从两次 layout 得到，因此它自动等于
+\(\sum_l PageBytes_l\)；`kv_capacity` 与 automatic sizing 不含任何 per-kind 公式。Host replica、
+checkpoint transfer 和 prefix-reuse 的 page copy 同样逐 plane 进行，`HostKVPageLayout.planes[i]`
+给出该 plane 的 `page_payload_bytes`，小 layer 不会按大 layer 的 page size 传输。
+
+Prefix reuse 的 identity tag 包含整个 schedule（两个 kind 与边界 \(N\)），因为一个 schedule 写下的
+KV 不能按另一个 schedule 读取。
+
+Per-layer 的精度阈值（哪些 layer 真的需要 8-bit keys、\(N\) 应该取多少）尚未测量。评估协议是在 code
+domain 上运行
+`ninfer-perplexity <model.ninfer> --corpus <manifest.json> --kv-dtype <spec>`，把候选 schedule 与
+uniform kinds 比较；本文不预设阈值。
 
 ---
 
@@ -747,7 +818,8 @@ consumer，且 replay in-flight期间不得改写同一 row。
 
 1. 每个 Device page-group lease 在所属 pool 中至多承载一个 logical page replica。
 2. 同一 pool 只组合共享 frontier、lifetime、page size与allocation语义的planes。
-3. 一个 pool 的 K/V/code/scale planes 对同一 logical block 使用同一个 page-group ID。
+3. 一个 pool 的 K/V/code/scale planes 对同一 logical block 使用同一个 page-group ID；per-layer
+   profile 可以不同，page-group identity 与 frontier 不变。
 4. Device occupancy 按 allocated leases与reservations计数；logical aliases不重复计费。
 5. Logical page identity、content epoch与physical page ID彼此独立。
 6. Valid frontier精确到token；page boundary不改变Attention或checkpoint语义。
@@ -769,7 +841,8 @@ consumer，且 replay in-flight期间不得改写同一 row。
 | 职责 | 主要位置 |
 |---|---|
 | Device page pools、reservations与execution tables | `src/core/paged_kv_cache.*` |
-| closed K/V data/scale plane schema | `src/core/paged_kv_storage.h` |
+| closed K/V data/scale plane schema 与 per-layer schedule 解析 | `src/core/paged_kv_storage.h` |
+| `KvCacheSchedule` 与 `--kv-dtype` spec 语法 | `include/ninfer/types.h` |
 | Host packed page layout与arena | `src/core/host_kv_arena.*` |
 | logical pages、references与address spaces | `src/models/qwen3_5/program/storage/kv_store.h` |
 | Host extent membership | `src/models/qwen3_5/program/storage/host_kv_store.h` |

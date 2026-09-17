@@ -3,6 +3,7 @@
 #include <limits>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace ninfer::models::qwen3_5 {
 namespace {
@@ -13,36 +14,26 @@ std::uint32_t page_count(std::uint32_t capacity) {
 }
 
 PagedKVCacheLayout plan_cache(LayoutBuilder& builder, std::uint32_t layers, std::uint32_t capacity,
-                              std::int32_t kv_heads, std::int32_t head_dim, KvCacheStorage storage,
-                              std::int32_t table_rows, std::uint32_t physical_page_groups) {
+                              std::int32_t kv_heads, std::int32_t head_dim,
+                              const KvCacheSchedule& schedule, std::int32_t table_rows,
+                              std::uint32_t physical_page_groups) {
     if (layers == 0 ||
         layers > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) ||
         kv_heads <= 0 || head_dim <= 0 || table_rows <= 0) {
         throw std::invalid_argument("Paged KV cache geometry is invalid");
     }
-    const PagedKVStorageLayout layer_storage = paged_kv_storage_layout(storage, head_dim);
+    // One plane schema per layer. A two-tier schedule makes the tail layers' planes smaller, so
+    // the same page-group ID lands on a different byte offset in each layer without the pool
+    // needing a single page byte size.
+    std::vector<PagedKVStorageLayout> layer_storage =
+        paged_kv_schedule_layouts(schedule, layers, head_dim);
 
     const std::uint32_t logical_pages = page_count(capacity);
     if (physical_page_groups < logical_pages) {
         throw std::invalid_argument("Paged KV physical pages are below logical capacity");
     }
 
-    KVPageGeometry geometry;
-    geometry.planes.reserve(static_cast<std::size_t>(layers) * layer_storage.planes_per_layer());
-    for (std::uint32_t layer = 0; layer < layers; ++layer) {
-        geometry.planes.push_back(
-            {layer_storage.key.data_dtype, layer_storage.key.data_leading_extent, kv_heads, 256});
-        geometry.planes.push_back({layer_storage.value.data_dtype,
-                                   layer_storage.value.data_leading_extent, kv_heads, 256});
-        if (layer_storage.key.has_scale()) {
-            geometry.planes.push_back({layer_storage.key.scale_dtype,
-                                       layer_storage.key.scale_leading_extent, kv_heads, 256});
-        }
-        if (layer_storage.value.has_scale()) {
-            geometry.planes.push_back({layer_storage.value.scale_dtype,
-                                       layer_storage.value.scale_leading_extent, kv_heads, 256});
-        }
-    }
+    KVPageGeometry geometry = paged_kv_page_geometry(layer_storage, kv_heads);
     return PagedKVCacheLayout{
         .pages = plan_device_kv_page_pool(
             builder, DeviceKVPagePoolSpec{.page_group_count = physical_page_groups,
@@ -53,7 +44,7 @@ PagedKVCacheLayout plan_cache(LayoutBuilder& builder, std::uint32_t layers, std:
         .layers        = layers,
         .max_context   = capacity,
         .kv_heads      = kv_heads,
-        .layer_storage = layer_storage,
+        .layer_storage = std::move(layer_storage),
     };
 }
 
@@ -65,9 +56,10 @@ DecoderStateLayout plan_decoder_state(LayoutBuilder& builder, const DecoderState
                                 spec.attention_head_dim, spec.kv_storage, spec.kv_table_rows,
                                 spec.text_physical_page_groups);
     if (spec.enable_mtp) {
+        // The MTP layer follows the text stack, so it takes the schedule's tail kind.
         layout.mtp_kv = plan_cache(builder, spec.mtp_layers, spec.capacity, spec.kv_heads,
-                                   spec.attention_head_dim, spec.kv_storage, spec.kv_table_rows,
-                                   spec.mtp_physical_page_groups);
+                                   spec.attention_head_dim, spec.kv_storage.trailing_storage(),
+                                   spec.kv_table_rows, spec.mtp_physical_page_groups);
     }
     return layout;
 }
@@ -76,10 +68,23 @@ PagedKVCache::PagedKVCache(DeviceSpan backing, const PagedKVCacheLayout& layout)
     : pages_(backing, layout.pages), execution_tables_(backing, layout.execution_tables, pages_),
       layers_(layout.layers), max_context_(layout.max_context), kv_heads_(layout.kv_heads),
       layer_storage_(layout.layer_storage) {
-    if (pages_.plane_count() !=
-        static_cast<std::size_t>(layers_) * layer_storage_.planes_per_layer()) {
+    if (layer_storage_.size() != static_cast<std::size_t>(layers_)) {
+        throw std::invalid_argument("Paged KV layer storage inventory is inconsistent");
+    }
+    plane_bases_.reserve(layer_storage_.size());
+    std::size_t base = 0;
+    for (const PagedKVStorageLayout& layer : layer_storage_) {
+        plane_bases_.push_back(base);
+        base += layer.planes_per_layer();
+    }
+    if (pages_.plane_count() != base) {
         throw std::invalid_argument("Paged KV layer plane inventory is inconsistent");
     }
+}
+
+const PagedKVStorageLayout& PagedKVCache::layer_storage(std::uint32_t layer) const {
+    if (layer >= layers_) { throw std::out_of_range("Paged KV layer is out of range"); }
+    return layer_storage_[layer];
 }
 
 PagedKVCacheView::PagedKVCacheView(const PagedKVCache& cache, Tensor block_table) noexcept
@@ -103,20 +108,20 @@ PagedKVCacheView PagedKVCache::execution_view(const KVExecutionRowLease& row) co
 
 PagedKVLayerView PagedKVCache::layer_view(std::uint32_t layer, Tensor block_table) const {
     if (layer >= layers_) { throw std::out_of_range("Paged KV layer is out of range"); }
-    const std::size_t stride        = layer_storage_.planes_per_layer();
-    const std::size_t base          = static_cast<std::size_t>(layer) * stride;
-    const std::size_t k_scale_index = base + 2;
+    const PagedKVStorageLayout& storage = layer_storage_[layer];
+    const std::size_t base              = plane_bases_[layer];
+    const std::size_t k_scale_index     = base + 2;
     const std::size_t v_scale_index =
-        k_scale_index + static_cast<std::size_t>(layer_storage_.key.has_scale());
+        k_scale_index + static_cast<std::size_t>(storage.key.has_scale());
     return PagedKVLayerView{
         .k_pages       = pages_.plane(base),
         .v_pages       = pages_.plane(base + 1),
-        .k_scale_pages = layer_storage_.key.has_scale() ? pages_.plane(k_scale_index) : Tensor(),
-        .v_scale_pages = layer_storage_.value.has_scale() ? pages_.plane(v_scale_index) : Tensor(),
+        .k_scale_pages = storage.key.has_scale() ? pages_.plane(k_scale_index) : Tensor(),
+        .v_scale_pages = storage.value.has_scale() ? pages_.plane(v_scale_index) : Tensor(),
         .block_table   = block_table,
-        .head_dim      = layer_storage_.head_dim,
+        .head_dim      = storage.head_dim,
         .num_kv_heads  = kv_heads_,
-        .storage       = layer_storage_.storage,
+        .storage       = storage.storage,
     };
 }
 

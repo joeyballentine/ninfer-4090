@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include <span>
+#include <vector>
 
 namespace ninfer {
 
@@ -115,6 +117,50 @@ struct PagedKVStorageLayout {
         break;
     }
     throw std::invalid_argument("unsupported paged KV-cache storage geometry");
+}
+
+/**
+ * Resolves one schedule into the physical plane schema of every KV-bearing layer.
+ *
+ * Layer `l` is the l-th full-attention layer of the text stack, not the l-th text layer: the
+ * interleaved GDN layers hold a fixed recurrent state and never reach a paged pool. A uniform
+ * schedule yields the same layout for every layer and reproduces single-kind planning exactly.
+ */
+[[nodiscard]] inline std::vector<PagedKVStorageLayout>
+paged_kv_schedule_layouts(const KvCacheSchedule& schedule, std::uint32_t layers,
+                          std::int32_t head_dim) {
+    if (layers == 0) { throw std::invalid_argument("paged KV schedule needs at least one layer"); }
+    if (!schedule.uniform() && schedule.head_layers >= layers) {
+        throw std::invalid_argument(
+            "KV-cache schedule boundary must be below the model's full-attention layer count");
+    }
+    std::vector<PagedKVStorageLayout> out;
+    out.reserve(layers);
+    const PagedKVStorageLayout head = schedule.uniform()
+                                          ? PagedKVStorageLayout{}
+                                          : paged_kv_storage_layout(schedule.head, head_dim);
+    const PagedKVStorageLayout tail = paged_kv_storage_layout(schedule.tail, head_dim);
+    for (std::uint32_t layer = 0; layer < layers; ++layer) {
+        out.push_back(layer < schedule.head_layers ? head : tail);
+    }
+    return out;
+}
+
+/** Physical bytes one token of one layer occupies across every KV head. */
+[[nodiscard]] inline std::size_t paged_kv_layer_bytes_per_token(const PagedKVStorageLayout& layout,
+                                                                std::int32_t num_kv_heads) {
+    if (num_kv_heads <= 0) { throw std::invalid_argument("KV head count must be positive"); }
+    return layout.physical_bytes_per_token_head() * static_cast<std::size_t>(num_kv_heads);
+}
+
+/** Physical bytes one token occupies across every layer of a scheduled pool. */
+[[nodiscard]] inline std::size_t
+paged_kv_bytes_per_token(std::span<const PagedKVStorageLayout> layers, std::int32_t num_kv_heads) {
+    std::size_t total = 0;
+    for (const PagedKVStorageLayout& layer : layers) {
+        total += paged_kv_layer_bytes_per_token(layer, num_kv_heads);
+    }
+    return total;
 }
 
 } // namespace ninfer

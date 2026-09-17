@@ -123,9 +123,11 @@ std::uint64_t projected_service_work(const runtime::RequestPlanSummary& summary,
 }
 
 std::uint32_t capture_identity_tag(SpeculativeBackend backend, ProposalHead proposal,
-                                   KvCacheStorage storage) noexcept {
+                                   const KvCacheSchedule& schedule) noexcept {
+    // KV written under one schedule is not readable as another, so the whole schedule, not just a
+    // single kind, separates reusable prefixes.
     return static_cast<std::uint32_t>(backend) | (static_cast<std::uint32_t>(proposal) << 8U) |
-           (static_cast<std::uint32_t>(storage) << 16U);
+           (schedule.identity_tag() << 16U);
 }
 
 runtime::PrefillWork rebuild_work_at_frontier(const PreparedPromptData& prompt,

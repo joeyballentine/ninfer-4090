@@ -119,7 +119,7 @@ const char* protocol_name(std::string_view protocol) noexcept {
     return "http";
 }
 
-const char* kv_cache_name(ninfer::KvCacheStorage storage) noexcept {
+const char* kv_cache_storage_name(ninfer::KvCacheStorage storage) noexcept {
     switch (storage) {
     case ninfer::KvCacheStorage::BFloat16:
         return "bf16";
@@ -141,6 +141,11 @@ const char* kv_cache_name(ninfer::KvCacheStorage storage) noexcept {
         return "rk2v4-e8";
     }
     return "unknown";
+}
+
+// The resolved schedule: one kind, or `<kind>:<layers>,<kind>` for a two-tier one.
+std::string kv_cache_name(const ninfer::KvCacheSchedule& schedule) {
+    return ninfer::kv_cache_schedule_spec(schedule, kv_cache_storage_name);
 }
 
 const char* kv_capacity_mode_name(ninfer::KvCapacityMode mode) noexcept {

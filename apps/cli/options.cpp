@@ -52,19 +52,11 @@ float parse_float(const char* text, std::string_view label, float minimum, float
     return static_cast<float>(value);
 }
 
-KvCacheStorage parse_kv_cache(std::string_view text) {
-    if (text == "bf16") { return KvCacheStorage::BFloat16; }
-    if (text == "int8") { return KvCacheStorage::Int8Group64; }
-    if (text == "fp8") { return KvCacheStorage::Fp8E4M3Row256; }
-    if (text == "nvfp4") { return KvCacheStorage::Nvfp4Group16; }
-    if (text == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
-    // Packed int4 storage; only the sm_89 build implements it and startup planning rejects the
-    // selection on any other architecture.
-    if (text == "rk4v4") { return KvCacheStorage::RotatedInt4KeyInt4ValueGroup64; }
-    if (text == "rk4v4-e8") { return KvCacheStorage::RK4V4E8; }
-    if (text == "rk8v4") { return KvCacheStorage::RotatedInt8KeyInt4ValueGroup64; }
-    if (text == "rk2v4-e8") { return KvCacheStorage::RK2V4E8; }
-    throw std::invalid_argument("invalid kv-dtype: " + std::string(text));
+KvCacheSchedule parse_kv_cache(std::string_view text) {
+    // `X` keeps one storage for every attention layer; `X:N,Y` gives the first N attention layers
+    // X and the rest Y. The rotated packed kinds only exist in the sm_89 build and startup
+    // planning rejects them on any other architecture.
+    return parse_kv_cache_schedule(text);
 }
 
 KvCapacityPolicy parse_kv_capacity(const char* text) {
@@ -96,7 +88,8 @@ std::string usage_text(const char* argv0) {
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N]\n"
-           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8]\n"
+           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8"
+           "[:N,<kind>]]\n"
            "       [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
            "       [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
@@ -117,6 +110,8 @@ std::string usage_text(const char* argv0) {
            "keys with int4 values; all require an sm_89 build.\n"
            "--prefill-a8 fp8 admits the sm_89 E4M3 prefill routes of the groupwise weights "
            "(activation quantized per token, weights exact); default off.\n"
+           "--kv-dtype X:N,Y gives the first N full-attention layers storage X and the rest Y; "
+           "N counts attention layers only and must be below the model's attention-layer count.\n"
            "--wddm-evictable-budget budgets runtime memory against total VRAM on dedicated "
            "GPUs, ignoring the WDDM process budget (Windows only).\n"
            "--thinking-budget caps model-origin thinking tokens; inserted control tokens count "

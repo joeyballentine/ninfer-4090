@@ -67,6 +67,23 @@ struct KVPageGeometry {
     friend bool operator==(const KVPageGeometry&, const KVPageGeometry&) = default;
 };
 
+/**
+ * Expands a per-layer plane schema into one pool geometry.
+ *
+ * Planes are laid out and transferred independently, so layers with different storage kinds keep
+ * their own page byte size: one page-group ID selects a different byte offset in each layer's
+ * planes and no layer pays for another layer's representation. `plane_base` gives the first plane
+ * ordinal of a layer.
+ */
+[[nodiscard]] KVPageGeometry
+paged_kv_page_geometry(std::span<const PagedKVStorageLayout> layers, std::int32_t num_kv_heads,
+                       PagedKVPlaneOrder order = PagedKVPlaneOrder::PageMajor,
+                       std::size_t alignment   = 256);
+
+/** First plane ordinal of `layer` in a geometry built from the same per-layer schema. */
+[[nodiscard]] std::size_t paged_kv_plane_base(std::span<const PagedKVStorageLayout> layers,
+                                              std::uint32_t layer);
+
 struct DeviceKVPagePoolSpec {
     std::uint32_t page_group_count = 0;
     KVPageGeometry geometry;

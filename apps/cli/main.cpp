@@ -74,20 +74,9 @@ std::string format_finish(ninfer::FinishReason reason) {
     return "unknown";
 }
 
-std::string format_kv_cache(ninfer::KvCacheStorage storage) {
-    switch (storage) {
-    case ninfer::KvCacheStorage::BFloat16:
-        return "bf16";
-    case ninfer::KvCacheStorage::Int8Group64:
-        return "int8-group64";
-    case ninfer::KvCacheStorage::Fp8E4M3Row256:
-        return "fp8-e4m3-row256";
-    case ninfer::KvCacheStorage::Nvfp4Group16:
-        return "nvfp4";
-    case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
-        return "k8v4";
-    }
-    return "unknown";
+// The resolved schedule in `--kv-dtype` spelling: one kind, or `<kind>:<layers>,<kind>`.
+std::string format_kv_cache(const ninfer::KvCacheSchedule& schedule) {
+    return ninfer::kv_cache_schedule_spec(schedule);
 }
 
 std::string format_kv_capacity_mode(ninfer::KvCapacityMode mode) {
