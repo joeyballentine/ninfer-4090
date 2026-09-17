@@ -23,6 +23,15 @@ struct PrefillWork {
     [[nodiscard]] friend constexpr bool operator==(PrefillWork, PrefillWork) noexcept = default;
 };
 
+// Saturating unsigned product. Prefill features are counted in token pairs, which overflow a
+// 64-bit counter for adversarially large inputs; every such count clamps instead of wrapping.
+[[nodiscard]] inline constexpr std::uint64_t
+saturating_multiply(std::uint64_t value, std::uint64_t multiplier) noexcept {
+    return multiplier != 0 && value > std::numeric_limits<std::uint64_t>::max() / multiplier
+               ? std::numeric_limits<std::uint64_t>::max()
+               : value * multiplier;
+}
+
 // Exact prefill feature definition for a suffix beginning after prefix_tokens. Attention work is
 // prefix*suffix + suffix*(suffix+1)/2 and all arithmetic saturates.
 [[nodiscard]] inline PrefillWork make_prefill_work(std::uint64_t prefix_tokens,
@@ -33,16 +42,21 @@ struct PrefillWork {
     PrefillWork result;
     result.chunks =
         suffix_tokens == 0 || prefill_chunk == 0 ? 0 : 1U + (suffix_tokens - 1U) / prefill_chunk;
-    result.tokens                       = suffix_tokens;
-    result.vision_items                 = vision_items;
-    result.vision_patches               = vision_patches;
-        const std::uint64_t suffix      = suffix_tokens;
-    const std::uint64_t linear      = static_cast<std::uint64_t>(prefix_tokens) * suffix;
-    const std::uint64_t triangular  = suffix * (suffix + 1U) / 2U;
-    constexpr std::uint64_t maximum = ~(std::uint64_t)0;
-    const std::uint64_t attention =
-        triangular > maximum - linear ? maximum : linear + triangular;
-    result.attention_pairs = attention;
+    result.tokens                   = suffix_tokens;
+    result.vision_items             = vision_items;
+    result.vision_patches           = vision_patches;
+    const std::uint64_t suffix      = suffix_tokens;
+    constexpr std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+    // Both products saturate. The triangular term overflows past a 2^32-token suffix and the
+    // prefix*suffix term overflows far earlier for a long reused prefix; leaving the latter
+    // unchecked made an adversarial prompt wrap to a near-zero, and therefore free, cost.
+    // suffix*(suffix+1)/2 is halved before multiplying so the exact product never needs 65 bits.
+    const bool even                = (suffix % 2U) == 0U;
+    const std::uint64_t half       = even ? suffix / 2U : (suffix / 2U) + 1U;
+    const std::uint64_t other      = even ? suffix + 1U : suffix;
+    const std::uint64_t linear     = saturating_multiply(prefix_tokens, suffix);
+    const std::uint64_t triangular = saturating_multiply(half, other);
+    result.attention_pairs         = triangular > maximum - linear ? maximum : linear + triangular;
     return result;
 }
 
@@ -398,4 +412,3 @@ struct KvCapacityResolution {
 };
 
 } // namespace ninfer::runtime
-
