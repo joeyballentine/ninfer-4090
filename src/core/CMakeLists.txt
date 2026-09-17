@@ -7,6 +7,7 @@ add_library(ninfer_core STATIC
   cyclic_kv_cache.cpp
   host_kv_arena.cpp
   paged_kv_cache.cpp
+  positional_file.cpp
   linear_attention_state.cpp
   layout.cpp
   tensor.cpp

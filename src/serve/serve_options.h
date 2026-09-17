@@ -49,6 +49,7 @@ struct ServeOptions {
     PrefillA8 prefill_a8                   = PrefillA8::Off;
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;
+    PromptCacheOptions prompt_cache;
     bool enable_vision              = false;
     std::uint32_t vision_max_tokens = 8192;
     bool use_cuda_graph             = true;

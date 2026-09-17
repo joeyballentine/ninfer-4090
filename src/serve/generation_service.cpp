@@ -257,6 +257,7 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     engine_options.wddm_evictable_budget    = options_.wddm_evictable_budget;
     engine_options.speculative              = options_.speculative;
     engine_options.context_cache            = options_.context_cache;
+    engine_options.prompt_cache             = options_.prompt_cache;
     engine_options.context_cost.preset_path = options_.context_cost_presets;
     engine_options.media_cache_bytes        = options_.media_cache_bytes;
     engine_options.media_live_bytes         = options_.media_live_bytes;

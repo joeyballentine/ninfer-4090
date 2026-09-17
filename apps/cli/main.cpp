@@ -270,9 +270,15 @@ int main(int argc, char** argv) {
         engine_options.wddm_evictable_budget = cli.wddm_evictable_budget;
         // One CLI invocation owns exactly one request, so retained cross-request context has no
         // consumer and must not reserve an extra Device StateImage or run terminal capture.
-        engine_options.context_cache.enabled                = false;
-        engine_options.context_cache.host_state_slots       = 0;
-        engine_options.context_cache.host_kv_capacity_bytes = 0;
+        // --prompt-cache changes that: the consumer is the next invocation, which needs the
+        // catalog and one host state slot as the restore destination.
+        engine_options.context_cache.enabled          = cli.prompt_cache;
+        engine_options.context_cache.host_state_slots = cli.prompt_cache ? 1U : 0U;
+        engine_options.context_cache.host_kv_capacity_bytes =
+            cli.prompt_cache ? ninfer::kDefaultHostKvCapacityBytes : 0U;
+        engine_options.prompt_cache.enabled   = cli.prompt_cache;
+        engine_options.prompt_cache.directory = cli.prompt_cache_dir;
+        engine_options.prompt_cache.max_bytes = cli.prompt_cache_max_bytes;
         engine_options.startup_observer                     = startup_log.observer();
 
         ninfer::Engine engine(std::move(engine_options));

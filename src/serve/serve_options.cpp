@@ -79,6 +79,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--device-state-slots N] [--host-state-slots N] [--host-kv-mib N] "
            "[--max-private-continuations N] [--max-shared-prefixes N] "
            "[--max-long-anchors-per-continuation N] "
+           "[--prompt-cache] [--prompt-cache-dir DIR] [--prompt-cache-max-bytes N] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8[:N,<kind>]] "
@@ -148,6 +149,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     bool default_max_tokens_explicit = false;
     bool kv_capacity_explicit        = false;
     bool context_capacity_explicit   = false;
+    bool prompt_cache_explicit       = false;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         options.help_requested = true;
         return options;
@@ -346,6 +348,19 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.greedy = true;
         } else if (arg == "--wddm-evictable-budget") {
             options.wddm_evictable_budget = true;
+        } else if (arg == "--prompt-cache") {
+            options.prompt_cache.enabled = true;
+        } else if (arg == "--prompt-cache-dir") {
+            options.prompt_cache.directory = require_value("--prompt-cache-dir");
+            prompt_cache_explicit          = true;
+        } else if (arg == "--prompt-cache-max-bytes") {
+            const std::uint64_t bytes =
+                parse_u64(require_value("--prompt-cache-max-bytes"), "prompt-cache-max-bytes");
+            if (bytes == 0 || bytes > std::numeric_limits<std::size_t>::max()) {
+                throw std::invalid_argument("--prompt-cache-max-bytes is out of range");
+            }
+            options.prompt_cache.max_bytes = static_cast<std::size_t>(bytes);
+            prompt_cache_explicit          = true;
         } else if (arg == "--log-level") {
             options.log_level = product::parse_log_level(require_value("--log-level"));
         } else {
@@ -363,6 +378,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         options.context_cache.enabled                = false;
         options.context_cache.host_state_slots       = 0;
         options.context_cache.host_kv_capacity_bytes = 0;
+        if (options.prompt_cache.enabled) {
+            throw std::invalid_argument("--no-prefix-reuse cannot be combined with --prompt-cache");
+        }
+    }
+    if (!options.prompt_cache.enabled && prompt_cache_explicit) {
+        throw std::invalid_argument(
+            "--prompt-cache-dir and --prompt-cache-max-bytes require --prompt-cache");
     }
     if (options.port <= 0 || options.port > 65535) {
         throw std::invalid_argument("--port must be in [1,65535]");

@@ -421,6 +421,35 @@ int main() {
     failures += check(!secret_present, "startup argv retained the API key");
     failures += check(redaction_present, "startup argv omitted the API-key redaction marker");
 
+    const ServeOptions prompt_cache_off = parse({"ninfer-serve", "model.ninfer"});
+    failures += check(!prompt_cache_off.prompt_cache.enabled &&
+                          prompt_cache_off.prompt_cache.directory.empty() &&
+                          prompt_cache_off.prompt_cache.max_bytes ==
+                              ninfer::kDefaultPromptCacheMaxBytes,
+                      "the persistent prompt cache is not off by default");
+    const ServeOptions prompt_cache_on =
+        parse({"ninfer-serve", "model.ninfer", "--prompt-cache", "--prompt-cache-dir",
+               "/var/cache/ninfer", "--prompt-cache-max-bytes", "1073741824"});
+    failures += check(prompt_cache_on.prompt_cache.enabled &&
+                          prompt_cache_on.prompt_cache.directory == "/var/cache/ninfer" &&
+                          prompt_cache_on.prompt_cache.max_bytes == 1073741824ULL,
+                      "--prompt-cache options did not reach the serve options");
+    bool orphan_prompt_cache_dir_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--prompt-cache-dir", "/var/cache/ninfer"});
+    } catch (const std::invalid_argument&) { orphan_prompt_cache_dir_rejected = true; }
+    failures += check(orphan_prompt_cache_dir_rejected,
+                      "serve accepted --prompt-cache-dir without --prompt-cache");
+    bool prompt_cache_without_reuse_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--prompt-cache", "--no-prefix-reuse"});
+    } catch (const std::invalid_argument&) { prompt_cache_without_reuse_rejected = true; }
+    failures += check(prompt_cache_without_reuse_rejected,
+                      "serve accepted --prompt-cache together with --no-prefix-reuse");
+    failures += check(serve_usage_text("ninfer-serve").find("--prompt-cache-max-bytes") !=
+                          std::string::npos,
+                      "serve help omits the persistent prompt cache options");
+
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

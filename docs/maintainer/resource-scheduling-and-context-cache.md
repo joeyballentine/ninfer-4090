@@ -422,6 +422,70 @@ backend KV 采用另一种 coverage。Checkpoint 只有在全部 required compon
 
 ---
 
+### 5.3 Persistent disk tier
+
+Device checkpoint 与 pinned Host State slot 之上还有第三层：**Disk record**。它是可选的（`--prompt-cache`），
+默认关闭，用于跨进程重启和超出 Host slot 预算的工作集。前两层丢失一个 checkpoint 后只能重新 prefill；
+Disk record 让同一 prefix identity 可以以 I/O 代价恢复。
+
+三层的语义差别是明确的：
+
+| 层 | 归属 | 生命周期 | 恢复代价 |
+|---|---|---|---|
+| Device checkpoint | Program StateImage/KV pool | 进程内，受 pressure planning 支配 | 无或 D2D |
+| Host State slot | Program pinned host store | 进程内，受 host 容量支配 | H2D |
+| Disk record | `ContextDiskStore` | 跨进程，受 size cap 与 LRU 支配 | 文件读 + pinned staging + H2D |
+
+Disk tier 不是 placement 的一种：它不参与 `Used_r(S)` 的物理容量计算，也不出现在 `ResourcePlan` 里。
+它只在两个逻辑边界上起作用，且两处都不改变 Program 的物理 authority。
+
+**身份。** Disk record 的键就是 checkpoint 的 `PrefixShortlistKey`（两个滚动 digest、frontier、
+identity_tag），与 §4.5 exact identity 使用同一份内容索引。store header 另外记录 artifact 与 KV layout
+signature；signature 不同的 store 被整体丢弃而不是部分信任，因为匹配它的任何一条 record 都会恢复出语义
+错误的状态。
+
+**Hook (a) — spill。** 两个触发点。Victim owner 在 `apply_private_action` / `apply_shared_action` 被
+evict 时提交一次；但 victim 被 apply 时其 pages 可能已经释放，所以真正承载的是 terminal publication 处的
+write-behind：checkpoint 刚进入 catalog 就提交，等到该 host slot 之后被 evict 时磁盘副本已经存在。
+Device-only checkpoint 从不提交，回读会与 decode round 争用同一条 transfer stream。
+提交只是入队；写入在专用 I/O 线程上按 batch 进行，decode round 不被阻塞。
+
+**Hook (b) — lookup。** 在 candidate 枚举之前执行，而不是之后。只有当 disk index 中某个 frontier 长于
+任何 resident 候选时才探测；命中则 restore 并装入一个 **空闲** catalog slot，随后按普通 resident source
+参与 §7 的 target 搜索与定价，只有未覆盖的后缀进入 prefill。不会为此驱逐 resident owner：那等于用未经
+验证的 disk source 换掉已证明可用的内存 source。把恢复出的字节变成 continuation 是 Program 的职责，
+ResourceManager 通过 Engine 提供的 adoption 回调完成这一步。
+
+**Hook (c) — startup。** store 打开时重放 journal，重建 record 与 extent 索引。没有启动期扫描或压缩，
+因此启动代价与 record 数量成正比而与 pool 体积无关。
+
+**Hook (d) — durability。** 发布顺序是：extent 字节先 flush，然后 journal 追加带校验和的 publish entry
+并 flush。record 的存在性由该 entry 定义，所以断电或崩溃产生的残尾永远不会发布一条 payload 缺失的
+record；重放在第一个不完整或校验失败的帧处截断。相应地，cancellation 只在任务开始前检查：字节已经写下
+之后再放弃不会省下任何 I/O，只会在 pool 里留下无人引用的 extent。
+
+**存储格式。** 一个 cache 目录两个文件：`blobs.dat` 是 append-only、4 KiB 对齐、按内容寻址的 extent 流；
+`index.log` 是 append-only journal（sector 大小的 header，随后是长度与校验和分帧的 entry）。按内容寻址
+意味着后一轮与前一轮共享的 page 只写一次，所以每轮 spill 是小增量而不是整份重写。选择 segment + journal
+而不是每 record 一个文件，是因为 77k token 的 record 约一千多个 KV page：每 page 一个文件输给一次顺序
+extent 流，每 record 一个文件则丢掉跨轮共享。
+
+**容量与回收。** `--prompt-cache-max-bytes` 是 live extent 字节上限。触顶时一次性按 LRU 回收到低水位
+（默认 75%），而不是每次发布驱逐一条，避免逐轮抖动。被回收 record 的 extent 变成 dead bytes，由
+mark-and-sweep 压缩回收；压缩同时受 dead extent 数、dead 字节和碎片率三个阈值约束，不会为少量死页重写
+多 GB 的 pool。压缩在 I/O 线程上进行，复制阶段不持 index 锁，只在最后的文件交换时短暂持有，因此不阻塞
+executor；复制阶段可以被新到达的请求取消，此时活动 store 完全未被触碰。
+
+**批量。** 一条 record 的 page 数可达上千，整份 staging 会在 24 GB 级显卡上直接 OOM。spill 与 restore
+都按 `ContextDiskTransferPort::batch_pages()` 分批，tier 同时持有的 page 不超过一批。
+
+**DirectStorage。** Windows 上可以用 kernel-bypass DMA 跳过 pinned staging 往返。seam 声明在
+`ContextDiskTransferPort` 中并由 `_WIN32 && NINFER_DIRECTSTORAGE` 限定，本仓库不实现它（需要 Windows SDK、
+D3D12 设备和真实 GPU）。实现时必须在释放任何 staging 资源之前于 CPU 线程等待共享 D3D12 fence，否则
+DirectStorage 队列仍有请求在飞时释放 COM 资源会在 NVIDIA D3D12 驱动内崩溃。
+
+---
+
 ## 6. Active completion guarantee
 
 ### 6.1 Admission reservation
@@ -968,6 +1032,14 @@ terminal Finish 没有合法 publication capacity 时采用 Discard。
 | `max_shared_prefixes` | shared immutable owner/catalog 容量 |
 | `max_long_anchors_per_continuation` | 每条 private history 的 retained long checkpoints 上限 |
 
+`PromptCacheOptions` 独立解析第三层（§5.3）：
+
+| 配置轴 | 架构含义 |
+|---|---|
+| `enabled` | 是否启用 Disk tier；关闭时前两层语义完全不变 |
+| `directory` | store 目录；空值取 `<artifact dir>/.ninfer-cache/<config signature>` |
+| `max_bytes` | live extent 字节上限，超出按 LRU 回收到低水位 |
+
 所有 stores、catalogs、Program unique-object scratch 和 reusable planner frontiers 都按解析后的上限建立。
 每个 pressure planning session 的 target arena、hash 和 assessment storage 在 session 开始时按固定上限取得
 容量；target expansion 不得突破该容量。Logical claim manifests 与 adoption 所需容量必须在 Program mutation
@@ -991,6 +1063,8 @@ Context cache disabled 时采用 root-only 语义：不读取或发布 inactive 
 
 ## 12. 核心不变量
 
+0. Disk record 只在其 publish entry 完整落盘后存在；它不参与物理容量计算，也不能替代任一物理 store 的
+   residency 查询。
 1. Scheduler 先选择 request；资源层不能以 cache value 改变请求顺序。
 2. ResourceManager 是 logical cache policy 的唯一 authority，Program 是 physical state 的唯一 authority。
 3. Physical occupancy 按 unique allocations 与 concrete reservations 计数，不按 logical references 重复计数。
@@ -1030,6 +1104,9 @@ Context cache disabled 时采用 root-only 语义：不读取或发布 inactive 
 | State stores | `src/models/qwen3_5/program/storage/state_store.h` |
 | logical KV/address spaces | `src/models/qwen3_5/program/storage/kv_store.h` |
 | Host KV extents | `src/models/qwen3_5/program/storage/host_kv_store.h` |
+| persistent tier policy、spill/restore 状态机 | `src/runtime/engine/context_cache/context_disk_tier.h` |
+| on-disk 格式、journal、LRU 与 mark-and-sweep | `src/runtime/engine/context_cache/context_disk_store.h` |
+| positional/O_DIRECT 文件原语 | `src/core/positional_file.h` |
 | public capacity options | `include/ninfer/types.h` |
 
 路径用于定位当前实现，不改变本文定义的所有权边界。

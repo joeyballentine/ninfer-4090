@@ -34,6 +34,11 @@ struct Options {
     // Opt-in aggressive WDDM memory budgeting against total VRAM on dedicated GPUs (Windows only).
     bool wddm_evictable_budget = false;
 
+    // Persistent prompt cache. An empty directory selects the per-artifact default.
+    bool prompt_cache = false;
+    std::filesystem::path prompt_cache_dir;
+    std::size_t prompt_cache_max_bytes = kDefaultPromptCacheMaxBytes;
+
     bool raw_output      = false;
     bool print_token_ids = false;
     std::optional<bool> enable_thinking;
