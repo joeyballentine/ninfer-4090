@@ -194,9 +194,9 @@ into a token-level grammar over the loaded tokenizer, and every sampling decisio
 ids that grammar licenses. The returned `content` is therefore valid JSON, and schema-conformant
 when a schema is given. Enforcement applies to the whole response, so a structured request has no
 reasoning phase and cannot be combined with `tools` or a `thinking_budget`; those combinations are
-rejected with `response_format_conflict`. `strict` is passed to the schema compiler: `true` also
-rejects a schema construct the compiler cannot represent exactly instead of relaxing it. A schema
-the compiler cannot accept is a field-specific HTTP 400. A build configured with
+rejected with `response_format_conflict`. `strict` reaches the schema compiler: `true` closes
+objects and arrays, so the grammar admits no property or item the schema does not declare. A schema
+the compiler cannot accept is HTTP 400 `response_format_invalid`. A build configured with
 `-DNINFER_ENABLE_STRUCTURED_OUTPUT=OFF` has no grammar backend and rejects every non-text format
 with `response_format_not_supported`.
 

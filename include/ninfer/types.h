@@ -539,6 +539,8 @@ struct PromptInput {
 enum class RequestErrorKind : std::uint8_t {
     ContextLengthExceeded,
     ThinkingBudgetCapacityInsufficient,
+    // The requested output language could not be compiled against this model's tokenizer.
+    StructuredOutputInvalid,
     MediaBudgetExceeded,
     InvalidMedia,
     Overloaded,

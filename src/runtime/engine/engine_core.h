@@ -199,9 +199,18 @@ public:
 
         std::shared_ptr<Request> request;
         try {
-            auto output = instance_.frontend.make_output_session(
-                prompt, options.stop, options.output, options.execution.thinking,
-                options.structured_output);
+            auto output = [&] {
+                try {
+                    return instance_.frontend.make_output_session(
+                        prompt, options.stop, options.output, options.execution.thinking,
+                        options.structured_output);
+                } catch (const std::invalid_argument& error) {
+                    // Only a structured request can fail here for a caller-supplied reason: the
+                    // schema does not compile against this model's tokenizer.
+                    if (!options.structured_output.enabled()) { throw; }
+                    throw RequestError(RequestErrorKind::StructuredOutputInvalid, error.what());
+                }
+            }();
             const std::uint32_t capacity_output =
                 max_context_ - prompt_summary.prompt_tokens + static_cast<std::uint32_t>(1);
             try {
