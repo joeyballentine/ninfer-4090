@@ -116,3 +116,22 @@ def configure(model, recipe, sources):
             artifact.directory.bindings["text/layers/0/mlp/up"], artifact.by_id
         )[0][0]
         assert gate != up
+
+
+def test_invoke_routes_the_calibration_directory(tmp_path):
+    from tools.convert.__main__ import _invoke
+
+    seen = {}
+
+    def plain(model, recipe, sources):
+        seen["plain"] = True
+
+    def calibrated(model, recipe, sources, *, calibration=None):
+        seen["calibration"] = calibration
+
+    assert _invoke(plain, None, None, {}, tmp_path) is False
+    assert seen == {"plain": True}
+    assert _invoke(calibrated, None, None, {}, tmp_path) is True
+    assert seen["calibration"] == tmp_path
+    assert _invoke(calibrated, None, None, {}, None) is True
+    assert seen["calibration"] is None

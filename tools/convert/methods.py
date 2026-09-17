@@ -308,17 +308,22 @@ def grouped_gptq(request: PrepareRequest) -> PreparedMethod:
 
     def produce(output):
         row = 0
+        plans = {}
         for item, site in zip(request.inputs, sites):
-            plan = gptq_plan(
-                request.target.format,
-                k,
-                store.hessian(site, k),
-                device=request.device,
-                block_size=block_size,
-                damping=damping,
-                act_order=act_order,
-                candidates=candidates,
-            )
+            # Projections packed into one parent usually read one input and
+            # then share its factorization.
+            if site not in plans:
+                plans[site] = gptq_plan(
+                    request.target.format,
+                    k,
+                    store.hessian(site, k),
+                    device=request.device,
+                    block_size=block_size,
+                    damping=damping,
+                    act_order=act_order,
+                    candidates=candidates,
+                )
+            plan = plans[site]
             rows = item.source.shape[0]
             for begin in range(0, rows, request.rows_per_chunk):
                 end = min(rows, begin + request.rows_per_chunk)
