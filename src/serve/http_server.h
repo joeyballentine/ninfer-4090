@@ -91,6 +91,9 @@ private:
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
 
+    // `GET /props`: web-UI support only, see docs/serving.md.
+    [[nodiscard]] std::string render_props() const;
+
     [[nodiscard]] ExecutorGauges executor_gauges() const;
 
     void record_request_start(const RequestLogContext& context);

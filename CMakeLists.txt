@@ -24,6 +24,11 @@ option(NINFER_BUILD_BENCHMARKS "Build NInfer benchmarks" OFF)
 # schema into a token-level automaton. OFF drops the dependency and the enforcement together; the
 # serving layer then rejects every non-text format with response_format_not_supported again.
 option(NINFER_ENABLE_STRUCTURED_OUTPUT "Enforce grammar-constrained JSON output" ON)
+# Serve the llama.cpp web UI from ninfer-serve. ON downloads and verifies the pinned release at
+# configure time (see cmake/NinferWebUI.cmake) and compiles it into ninfer_serve. Upstream policy
+# avoids configure-time downloads: turn this OFF, or pass -DNINFER_WEBUI_TARBALL=/path/file.tar.gz,
+# to configure without network access.
+option(NINFER_EMBED_WEBUI "Embed the llama.cpp web UI into ninfer-serve" ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -68,6 +73,12 @@ endif()
 
 include(cmake/Dependencies.cmake)
 include(cmake/NinferTargets.cmake)
+
+# Declared here rather than under src/serve so the generator's custom command does not inherit the
+# serving directory's order-only dependency on every NInfer library, including the CUDA ones.
+if(NINFER_EMBED_WEBUI AND NINFER_BUILD_PRODUCT_SUPPORT)
+  include(cmake/NinferWebUI.cmake)
+endif()
 
 # --- Subdirectories ----------------------------------------------------------
 add_subdirectory(src)
