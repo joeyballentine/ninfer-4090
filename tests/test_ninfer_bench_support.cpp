@@ -164,12 +164,41 @@ int test_cli_contract() {
     const qb::BenchOptions k8v4 =
         parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--kv-dtype", "k8v4"});
     failures += expect(k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value, "K8V4 KV");
+    // The sm_89 rotated family uses the serve CLI spellings; --kv-dtype and the report name
+    // table must agree with them for every storage the engine accepts.
+    const qb::BenchOptions rk8v4 =
+        parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--kv-dtype", "rk8v4"});
+    failures += expect(rk8v4.kv_cache == ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
+                       "RK8V4 KV");
+    const qb::BenchOptions rk4v4 =
+        parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--kv-dtype", "rk4v4"});
+    failures += expect(rk4v4.kv_cache == ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64,
+                       "RK4V4 KV");
+    const qb::BenchOptions rk4v4e8 =
+        parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--kv-dtype", "rk4v4-e8"});
+    failures += expect(rk4v4e8.kv_cache == ninfer::KvCacheStorage::RK4V4E8, "RK4V4-E8 KV");
+    const qb::BenchOptions rk2v4e8 =
+        parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--kv-dtype", "rk2v4-e8"});
+    failures += expect(rk2v4e8.kv_cache == ninfer::KvCacheStorage::RK2V4E8, "RK2V4-E8 KV");
     failures += expect(qb::usage_text("ninfer_bench").find("nvfp4|k8v4") != std::string::npos,
                        "benchmark help omits new KV modes");
+    failures += expect(qb::usage_text("ninfer_bench").find("rk8v4|rk4v4|rk4v4-e8|rk2v4-e8") !=
+                           std::string::npos,
+                       "benchmark help omits the rotated KV modes");
     failures += expect_string(qb::kv_cache_name(ninfer::KvCacheStorage::Nvfp4Group16), "nvfp4",
                               "NVFP4 report name");
     failures += expect_string(qb::kv_cache_name(ninfer::KvCacheStorage::Fp8KeyNvfp4Value), "k8v4",
                               "K8V4 report name");
+    failures +=
+        expect_string(qb::kv_cache_name(ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64),
+                      "rk8v4", "RK8V4 report name");
+    failures +=
+        expect_string(qb::kv_cache_name(ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64),
+                      "rk4v4", "RK4V4 report name");
+    failures += expect_string(qb::kv_cache_name(ninfer::KvCacheStorage::RK4V4E8), "rk4v4-e8",
+                              "RK4V4-E8 report name");
+    failures += expect_string(qb::kv_cache_name(ninfer::KvCacheStorage::RK2V4E8), "rk2v4-e8",
+                              "RK2V4-E8 report name");
     failures += expect_throws<std::invalid_argument>(
         [] {
             (void)parse_for_test(
