@@ -105,6 +105,19 @@ int main() {
                       "an explicit prompt cache directory was not used as given");
     failures += check(chosen.max_bytes == 4096, "an explicit size cap was not used as given");
 
+    // Two configurations of one artifact share a long signature prefix. The directory name is
+    // bounded, so it must carry a digest of the whole signature rather than a truncation, or the
+    // two stores would land in the same directory and reject and reset each other in turn.
+    const std::string long_prefix(120, 'x');
+    const ninfer::runtime::ContextDiskStoreConfig first =
+        ninfer::runtime::resolve_prompt_cache_config(normalized, long_prefix + ".a");
+    const ninfer::runtime::ContextDiskStoreConfig second =
+        ninfer::runtime::resolve_prompt_cache_config(normalized, long_prefix + ".b");
+    failures += check(first.directory != second.directory,
+                      "two long signatures sharing a prefix share a store directory");
+    failures += check(first.directory.filename().string().size() < 120,
+                      "the store directory name is not bounded");
+
     // A store with no signature could match anything, which is the one failure mode the header
     // signature exists to prevent.
     failures += check(

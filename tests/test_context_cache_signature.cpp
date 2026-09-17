@@ -90,10 +90,10 @@ int main() {
     };
     vary("artifact", [](ContextCacheSignatureFacts& f) { f.artifact_identity = "other artifact"; });
     vary("kv storage", [](ContextCacheSignatureFacts& f) {
-        f.kv_storage = KvCacheSchedule(KvCacheStorage::Int8);
+        f.kv_storage = KvCacheSchedule(KvCacheStorage::Int8Group64);
     });
     vary("kv schedule boundary", [](ContextCacheSignatureFacts& f) {
-        f.kv_storage = KvCacheSchedule(KvCacheStorage::BFloat16, 8, KvCacheStorage::Int8);
+        f.kv_storage = KvCacheSchedule(KvCacheStorage::BFloat16, 8, KvCacheStorage::Int8Group64);
     });
     vary("speculative backend",
          [](ContextCacheSignatureFacts& f) { f.speculative_backend = SpeculativeBackend::DFlash; });
@@ -120,8 +120,8 @@ int main() {
 
     // A two-tier schedule and a uniform schedule of the same tail kind read different pages, and
     // the identity tag is what separates them in memory as well.
-    const KvCacheSchedule uniform(KvCacheStorage::Int8);
-    const KvCacheSchedule tiered(KvCacheStorage::BFloat16, 8, KvCacheStorage::Int8);
+    const KvCacheSchedule uniform(KvCacheStorage::Int8Group64);
+    const KvCacheSchedule tiered(KvCacheStorage::BFloat16, 8, KvCacheStorage::Int8Group64);
     failures += check(uniform.identity_tag() != tiered.identity_tag(),
                       "the KV schedule identity tag does not separate a two-tier schedule");
     ContextCacheSignatureFacts uniform_facts = baseline();

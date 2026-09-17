@@ -1,6 +1,8 @@
 #include "runtime/engine/context_cache/context_disk_tier.h"
 
 #include <algorithm>
+#include <array>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -8,8 +10,17 @@
 namespace ninfer::runtime {
 namespace {
 
-// A signature becomes a directory name, so it is reduced to characters every filesystem accepts.
+// A signature becomes a directory name, so it is reduced to characters every filesystem accepts
+// and bounded to a length every filesystem accepts. Truncating alone would let two signatures that
+// agree on a long prefix - which two configurations of one artifact do - name the same directory
+// and then repeatedly reject and reset each other's store, so the bounded name keeps a readable
+// head and a digest of the whole signature.
 [[nodiscard]] std::string signature_path_component(std::string_view identity) {
+    std::uint64_t digest = 0xcbf29ce484222325ULL;
+    for (const char character : identity) {
+        digest ^= static_cast<std::uint8_t>(character);
+        digest *= 0x100000001b3ULL;
+    }
     std::string name;
     name.reserve(identity.size());
     for (const char character : identity) {
@@ -19,7 +30,12 @@ namespace {
                            character == '.' || character == '_';
         name.push_back(plain ? character : '-');
     }
-    if (name.size() > 96) { name.resize(96); }
+    if (name.size() > 64) { name.resize(64); }
+    std::array<char, 17> digits{};
+    (void)std::snprintf(digits.data(), digits.size(), "%016llx",
+                        static_cast<unsigned long long>(digest));
+    name.push_back('-');
+    name.append(digits.data(), 16);
     return name;
 }
 
@@ -36,13 +52,12 @@ ContextDiskStoreConfig resolve_prompt_cache_config(const EngineOptions& options,
     if (config.directory.empty()) {
         std::filesystem::path base = options.artifact_path;
         base                       = base.has_parent_path() ? base.parent_path() : ".";
-        config.directory = base / ".ninfer-cache" / signature_path_component(identity);
+        config.directory           = base / ".ninfer-cache" / signature_path_component(identity);
     }
     config.max_bytes = options.prompt_cache.max_bytes != 0 ? options.prompt_cache.max_bytes
                                                            : kDefaultPromptCacheMaxBytes;
     return config;
 }
-
 
 ContextDiskTier::ContextDiskTier(ContextDiskStoreConfig config, ContextDiskTransferPort& port,
                                  std::uint32_t queue_depth)
@@ -68,10 +83,10 @@ void ContextDiskTier::request_spill(const DiskSpillRequest& request) {
         ++stats_.spills_requested;
         // Replacing an existing request for the same prefix keeps the queue from holding two
         // captures of the same frontier.
-        const auto duplicate = std::find_if(queue_.begin(), queue_.end(),
-                                            [&](const DiskSpillRequest& pending) {
-                                                return pending.key == request.key;
-                                            });
+        const auto duplicate =
+            std::find_if(queue_.begin(), queue_.end(), [&](const DiskSpillRequest& pending) {
+                return pending.key == request.key;
+            });
         if (duplicate != queue_.end()) {
             *duplicate = request;
         } else {
@@ -125,7 +140,7 @@ void ContextDiskTier::run_spill(const DiskSpillRequest& request) {
         return;
     }
 
-    bool published    = false;
+    bool published      = false;
     std::uint64_t bytes = 0;
     try {
         ContextDiskStore::RecordWriter writer =
@@ -158,9 +173,8 @@ void ContextDiskTier::run_spill(const DiskSpillRequest& request) {
                 return;
             }
             for (std::uint32_t page = 0; page < count; ++page) {
-                writer.write_page(
-                    staged.subspan(static_cast<std::size_t>(page) * geometry->page_bytes,
-                                   geometry->page_bytes));
+                writer.write_page(staged.subspan(
+                    static_cast<std::size_t>(page) * geometry->page_bytes, geometry->page_bytes));
             }
             bytes += staged.size();
         }
@@ -257,9 +271,7 @@ bool ContextDiskTier::restore(const DiskRecordDescriptor& record) {
             }
             bytes += needed;
         }
-    } catch (const std::exception&) {
-        complete = false;
-    }
+    } catch (const std::exception&) { complete = false; }
     port_.end_restore(complete);
 
     const std::lock_guard<std::mutex> guard(mutex_);
