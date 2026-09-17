@@ -734,13 +734,16 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
 
 void validate_target_options(const execution::Parameters& parameters, DeviceContext& device,
                              const EngineOptions& options) {
-    // The packed int4 modes (rk4v4, rk4v4-e8) exist only in the sm_89 i8 attention kernels;
-    // on any other architecture startup fails before any device memory is reserved.
+    // The rotated packed modes (rk8v4, rk4v4, rk4v4-e8, rk2v4-e8) exist only in the sm_89 i8
+    // attention kernels; on any other architecture startup fails before any device memory is
+    // reserved.
     if ((options.kv_cache == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
-         options.kv_cache == KvCacheStorage::RK4V4E8) &&
+         options.kv_cache == KvCacheStorage::RK4V4E8 ||
+         options.kv_cache == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
+         options.kv_cache == KvCacheStorage::RK2V4E8) &&
         device.compute_capability() != 89) {
-        throw std::invalid_argument(
-            "kv-dtype rk4v4/rk4v4-e8 requires compute capability 8.9 (RTX 4090 build)");
+        throw std::invalid_argument("kv-dtype rk8v4/rk4v4/rk4v4-e8/rk2v4-e8 requires compute "
+                                    "capability 8.9 (RTX 4090 build)");
     }
     if (!parameters.model.config().text.attention ||
         parameters.model.config().text.full_attention_layers == 0) {

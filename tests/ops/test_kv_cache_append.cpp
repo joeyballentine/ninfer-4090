@@ -1,4 +1,5 @@
 #include "ninfer/ops/kv_cache_append.h"
+#include "ops/kv_rotated_codec.h"
 #include "ops/op_tester.h"
 #include "core/decode_graph.h"
 #include "core/device.h"
@@ -37,6 +38,12 @@ constexpr int kFullFp8Groups      = 1;
 constexpr int kFullNvfp4Group     = 16;
 constexpr int kFullNvfp4Groups    = kFullHeadDim / kFullNvfp4Group;
 constexpr int kFullNvfp4CodeBytes = kFullHeadDim / 2;
+// Rotated sm_89 family: packed int4 planes hold two codes per byte; the E8 cylinder key plane
+// holds one (root, radius|axis) byte pair per 8 dimensions.
+constexpr int kFullPackedCodeBytes  = kFullHeadDim / 2;
+constexpr int kFullE8RootCodeBytes  = kFullHeadDim / 4;
+constexpr int kFullE8Sub            = 8;
+constexpr int kFullE8SubsPerGroup   = kFullGroup / kFullE8Sub;
 
 struct TestVectorLayout {
     DType code_dtype;
@@ -67,6 +74,16 @@ TestCacheLayout test_cache_layout(KvCacheStorage storage) {
     case KvCacheStorage::Fp8KeyNvfp4Value:
         return {{DType::FP8_E4M3FN, kFullHeadDim, DType::FP16, kFullFp8Groups},
                 {DType::U8, kFullNvfp4CodeBytes, DType::U8, kFullNvfp4Groups}};
+    case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
+        return {{DType::I8, kFullHeadDim, DType::FP16, kFullGroups},
+                {DType::U8, kFullPackedCodeBytes, DType::FP16, kFullGroups}};
+    case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+    case KvCacheStorage::RK4V4E8:
+        return {{DType::U8, kFullPackedCodeBytes, DType::FP16, kFullGroups},
+                {DType::U8, kFullPackedCodeBytes, DType::FP16, kFullGroups}};
+    case KvCacheStorage::RK2V4E8:
+        return {{DType::U8, kFullE8RootCodeBytes, DType::FP16, kFullGroups},
+                {DType::U8, kFullPackedCodeBytes, DType::FP16, kFullGroups}};
     }
     throw std::invalid_argument("unsupported test KV storage");
 }
@@ -367,6 +384,305 @@ void encode_full_group(const std::vector<float>& source, std::size_t source_base
     scales[full_cache_index(kFullGroups, group, head, position, physical_page, kv_heads)] =
         scale_bits;
 }
+
+#if defined(NINFER_SM89)
+// ---------------------------------------------------------------------------
+// Rotated sm_89 family (rk8v4, rk4v4, rk4v4-e8, rk2v4-e8) exact codec oracle.
+// Every mode rotates K and V by H64 inside each 64-dim group before encoding.
+// K is int8 (rk8v4), packed int4 (rk4v4, with an E8 lattice projection for
+// rk4v4-e8) or an 8-bit E8 root plus a 4-bit radius and a 4-bit residual axis
+// per 8 dims (rk2v4-e8). V is always packed int4; both scale planes are FP16
+// per group-64.
+// ---------------------------------------------------------------------------
+
+bool is_rotated_storage(KvCacheStorage storage) {
+    return storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
+           storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
+           storage == KvCacheStorage::RK4V4E8 || storage == KvCacheStorage::RK2V4E8;
+}
+
+const char* rotated_storage_name(KvCacheStorage storage) {
+    switch (storage) {
+    case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
+        return "rk8v4";
+    case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+        return "rk4v4";
+    case KvCacheStorage::RK4V4E8:
+        return "rk4v4-e8";
+    case KvCacheStorage::RK2V4E8:
+        return "rk2v4-e8";
+    default:
+        return "rotated";
+    }
+}
+
+std::array<float, kFullGroup> rotated_group(const std::vector<float>& source, int group, int head,
+                                            int token, int kv_heads) {
+    std::array<float, kFullGroup> values{};
+    for (int i = 0; i < kFullGroup; ++i) {
+        values[static_cast<std::size_t>(i)] =
+            source[full_input_index(group * kFullGroup + i, head, token, kv_heads)];
+    }
+    test::rkv::hadamard64(values);
+    return values;
+}
+
+// Writes one (token, head, group-64) K/V unit of a rotated mode into the expected planes.
+// `ambiguous` receives the E8-cylinder key bytes whose device encoding may legitimately differ
+// from the host replica by one rounding boundary.
+void encode_rotated_group(KvCacheStorage storage, const std::vector<float>& host_k,
+                          const std::vector<float>& host_v, int group, int head, int token,
+                          int position, int page, int kv_heads,
+                          std::vector<std::uint8_t>& expected_k,
+                          std::vector<std::uint8_t>& expected_v,
+                          std::vector<std::uint16_t>& expected_scale_k,
+                          std::vector<std::uint16_t>& expected_scale_v,
+                          std::vector<std::uint8_t>& ambiguous) {
+    const bool packed_k = storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
+                          storage == KvCacheStorage::RK4V4E8;
+    const bool e8_lattice = storage == KvCacheStorage::RK4V4E8;
+    const bool e8_root    = storage == KvCacheStorage::RK2V4E8;
+
+    const std::array<float, kFullGroup> k_rot = rotated_group(host_k, group, head, token, kv_heads);
+    const std::array<float, kFullGroup> v_rot = rotated_group(host_v, group, head, token, kv_heads);
+    const std::uint16_t k_scale_bits =
+        test::rkv::group_scale_bits(test::rkv::group_absmax(k_rot), (packed_k || e8_root) ? 7.0f : 127.0f);
+    const std::uint16_t v_scale_bits =
+        test::rkv::group_scale_bits(test::rkv::group_absmax(v_rot), 7.0f);
+    const float k_scale = test::rkv::half_to_float(k_scale_bits);
+    const float v_scale = test::rkv::half_to_float(v_scale_bits);
+    const float k_inv   = k_scale > 0.0f ? 1.0f / k_scale : 0.0f;
+    const float v_inv   = v_scale > 0.0f ? 1.0f / v_scale : 0.0f;
+    expected_scale_k[full_cache_index(kFullGroups, group, head, position, page, kv_heads)] =
+        k_scale_bits;
+    expected_scale_v[full_cache_index(kFullGroups, group, head, position, page, kv_heads)] =
+        v_scale_bits;
+
+    // V: packed int4, low nibble of byte d/2 holds the even dimension.
+    for (int pair = 0; pair < kFullGroup / 2; ++pair) {
+        const int d = group * kFullGroup + 2 * pair;
+        const std::uint8_t byte =
+            test::rkv::pack_int4(test::rkv::quantize(v_rot[static_cast<std::size_t>(2 * pair)], v_inv, 7),
+                                 test::rkv::quantize(v_rot[static_cast<std::size_t>(2 * pair + 1)], v_inv, 7));
+        expected_v[full_cache_index(kFullPackedCodeBytes, d / 2, head, position, page, kv_heads)] =
+            byte;
+    }
+
+    if (e8_root) {
+        for (int sub = 0; sub < kFullE8SubsPerGroup; ++sub) {
+            std::array<float, kFullE8Sub> values{};
+            for (int i = 0; i < kFullE8Sub; ++i) {
+                values[static_cast<std::size_t>(i)] =
+                    k_rot[static_cast<std::size_t>(sub * kFullE8Sub + i)];
+            }
+            const test::rkv::CylinderCode code = test::rkv::encode_cylinder_8d(values, k_scale);
+            const int byte = group * (kFullGroup / 4) + sub * 2;
+            const auto root_index =
+                full_cache_index(kFullE8RootCodeBytes, byte, head, position, page, kv_heads);
+            expected_k[root_index]     = code.root;
+            expected_k[root_index + 1] = code.rad_axis;
+            if (code.ambiguous) {
+                ambiguous[root_index]     = 1U;
+                ambiguous[root_index + 1] = 1U;
+            }
+        }
+        return;
+    }
+
+    std::array<std::int8_t, kFullGroup> k_codes{};
+    if (e8_lattice) {
+        for (int sub = 0; sub < kFullE8SubsPerGroup; ++sub) {
+            std::array<float, kFullE8Sub> values{};
+            for (int i = 0; i < kFullE8Sub; ++i) {
+                values[static_cast<std::size_t>(i)] =
+                    k_rot[static_cast<std::size_t>(sub * kFullE8Sub + i)] * k_inv;
+            }
+            bool boundary = false;
+            test::rkv::e8_project_8d(values, &boundary);
+            for (int i = 0; i < kFullE8Sub; ++i) {
+                // The packed int4 codes carry no coset bit, so the D8+0.5 coset is collapsed
+                // here exactly as the kernel does (see small_t_i8.cuh).
+                const int quantized = static_cast<int>(std::rint(values[static_cast<std::size_t>(i)]));
+                k_codes[static_cast<std::size_t>(sub * kFullE8Sub + i)] =
+                    static_cast<std::int8_t>(std::clamp(quantized, -8, 7));
+                if (boundary) {
+                    const int d = group * kFullGroup + sub * kFullE8Sub + i;
+                    ambiguous[full_cache_index(kFullPackedCodeBytes, d / 2, head, position, page,
+                                               kv_heads)] = 1U;
+                }
+            }
+        }
+    } else {
+        const int limit = packed_k ? 7 : 127;
+        for (int i = 0; i < kFullGroup; ++i) {
+            k_codes[static_cast<std::size_t>(i)] =
+                test::rkv::quantize(k_rot[static_cast<std::size_t>(i)], k_inv, limit);
+        }
+    }
+    if (packed_k) {
+        for (int pair = 0; pair < kFullGroup / 2; ++pair) {
+            const int d = group * kFullGroup + 2 * pair;
+            expected_k[full_cache_index(kFullPackedCodeBytes, d / 2, head, position, page,
+                                        kv_heads)] =
+                test::rkv::pack_int4(k_codes[static_cast<std::size_t>(2 * pair)],
+                                     k_codes[static_cast<std::size_t>(2 * pair + 1)]);
+        }
+    } else {
+        for (int i = 0; i < kFullGroup; ++i) {
+            expected_k[full_cache_index(kFullHeadDim, group * kFullGroup + i, head, position, page,
+                                        kv_heads)] =
+                static_cast<std::uint8_t>(k_codes[static_cast<std::size_t>(i)]);
+        }
+    }
+}
+
+// verify_exact, except that key bytes flagged as boundary-ambiguous are allowed to differ: the
+// E8 lattice and cylinder decisions can sit on a rounding tie that a one-ULP host/device
+// difference flips. Every other byte, including all of rk8v4 and rk4v4, must match exactly.
+int verify_rotated_keys(const std::string& label, const std::vector<std::uint8_t>& actual,
+                        const std::vector<std::uint8_t>& expected,
+                        const std::vector<std::uint8_t>& ambiguous) {
+    std::size_t mismatches = 0;
+    std::size_t tolerated  = 0;
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        if (actual[i] == expected[i]) { continue; }
+        if (!ambiguous.empty() && ambiguous[i] != 0U) {
+            ++tolerated;
+            continue;
+        }
+        if (mismatches < 4) {
+            std::cerr << label << ": key byte " << i << " expected "
+                      << static_cast<int>(expected[i]) << " got " << static_cast<int>(actual[i])
+                      << '\n';
+        }
+        ++mismatches;
+    }
+    if (tolerated != 0) {
+        std::cout << label << ": " << tolerated
+                  << " boundary-ambiguous E8 cylinder key bytes tolerated\n";
+    }
+    return mismatches == 0 ? 0 : 1;
+}
+
+int rotated_append_case(int kv_heads, KvCacheStorage storage, int tokens = 3) {
+    const TestCacheLayout layout = test_cache_layout(storage);
+    const int first_position     = tokens >= 128 ? 61 : 63;
+    const int logical_pages      = (first_position + tokens + kPage - 1) / kPage;
+    const int physical_pages     = 2 * logical_pages + 1;
+    std::vector<std::int32_t> mapping(static_cast<std::size_t>(logical_pages));
+    for (int page = 0; page < logical_pages; ++page) {
+        mapping[static_cast<std::size_t>(page)] = 2 * page + 1;
+    }
+    std::vector<std::int32_t> positions(static_cast<std::size_t>(tokens));
+    for (int token = 0; token < tokens; ++token) {
+        positions[static_cast<std::size_t>(token)] = first_position + token;
+    }
+    const std::size_t input_count = static_cast<std::size_t>(kFullHeadDim) * kv_heads * tokens;
+    const auto plane_count        = [=](int leading_extent) {
+        return static_cast<std::size_t>(leading_extent) * kPage * kv_heads * physical_pages;
+    };
+    const std::size_t k_code_count  = plane_count(layout.key.code_extent);
+    const std::size_t v_code_count  = plane_count(layout.value.code_extent);
+    const std::size_t k_scale_count = plane_count(layout.key.scale_extent);
+    const std::size_t v_scale_count = plane_count(layout.value.scale_extent);
+
+    std::vector<float> host_k(input_count);
+    std::vector<float> host_v(input_count);
+    fill_uniform(host_k, 0x51735u + static_cast<std::uint32_t>(kv_heads), -0.75f, 0.75f);
+    fill_uniform(host_v, 0x62846u + static_cast<std::uint32_t>(kv_heads), -1.25f, 1.25f);
+    round_to_bf16(host_k);
+    round_to_bf16(host_v);
+    // One all-zero K group and one all-zero V group lock the zero-scale path of every mode
+    // (and, for rk2v4-e8, the zero-radius escape of the cylinder codec).
+    for (int i = 0; i < kFullGroup; ++i) {
+        host_k[full_input_index(i, 0, 0, kv_heads)]               = 0.0f;
+        host_v[full_input_index(kFullGroup + i, 0, 0, kv_heads)]  = 0.0f;
+    }
+
+    std::vector<std::uint16_t> input_k(input_count);
+    std::vector<std::uint16_t> input_v(input_count);
+    for (std::size_t i = 0; i < input_count; ++i) {
+        input_k[i] = f32_to_bf16(host_k[i]);
+        input_v[i] = f32_to_bf16(host_v[i]);
+        host_k[i]  = bf16_to_f32(input_k[i]);
+        host_v[i]  = bf16_to_f32(input_v[i]);
+    }
+
+    DeviceBuffer d_k         = to_device(input_k);
+    DeviceBuffer d_v         = to_device(input_v);
+    DeviceBuffer d_positions = to_device(positions);
+    DeviceBuffer d_mapping   = to_device(mapping);
+    Tensor k(d_k.p, DType::BF16, {kFullHeadDim, kv_heads, tokens});
+    Tensor v(d_v.p, DType::BF16, {kFullHeadDim, kv_heads, tokens});
+    Tensor position_tensor(d_positions.p, DType::I32, {tokens});
+
+    GuardedDeviceBuffer cache_k(k_code_count);
+    GuardedDeviceBuffer cache_v(v_code_count);
+    GuardedDeviceBuffer scale_k(k_scale_count * sizeof(std::uint16_t));
+    GuardedDeviceBuffer scale_v(v_scale_count * sizeof(std::uint16_t));
+
+    std::vector<std::uint8_t> expected_k(k_code_count, 0x55U);
+    std::vector<std::uint8_t> expected_v(v_code_count, 0xaaU);
+    auto expected_scale_k = patterned_bits(k_scale_count, 0x01234567u);
+    auto expected_scale_v = patterned_bits(v_scale_count, 0x89abcdefu);
+    std::vector<std::uint8_t> ambiguous(k_code_count, 0U);
+    cache_k.copy_from_host(expected_k.data(), expected_k.size());
+    cache_v.copy_from_host(expected_v.data(), expected_v.size());
+    scale_k.copy_from_host(expected_scale_k.data(), expected_scale_k.size() * sizeof(std::uint16_t));
+    scale_v.copy_from_host(expected_scale_v.data(), expected_scale_v.size() * sizeof(std::uint16_t));
+
+    PagedKVLayerView cache{
+        .k_pages       = Tensor(cache_k.data(), layout.key.code_dtype,
+                                {layout.key.code_extent, kPage, kv_heads, physical_pages}),
+        .v_pages       = Tensor(cache_v.data(), layout.value.code_dtype,
+                                {layout.value.code_extent, kPage, kv_heads, physical_pages}),
+        .k_scale_pages = Tensor(scale_k.data(), DType::FP16,
+                                {kFullGroups, kPage, kv_heads, physical_pages}),
+        .v_scale_pages = Tensor(scale_v.data(), DType::FP16,
+                                {kFullGroups, kPage, kv_heads, physical_pages}),
+        .block_table   = Tensor(d_mapping.p, DType::I32, {logical_pages}),
+        .head_dim      = kFullHeadDim,
+        .num_kv_heads  = kv_heads,
+        .storage       = storage,
+    };
+
+    for (int token = 0; token < tokens; ++token) {
+        const int position = positions[static_cast<std::size_t>(token)];
+        const int page     = mapping[static_cast<std::size_t>(position / kPage)];
+        for (int head = 0; head < kv_heads; ++head) {
+            for (int group = 0; group < kFullGroups; ++group) {
+                encode_rotated_group(storage, host_k, host_v, group, head, token, position, page,
+                                     kv_heads, expected_k, expected_v, expected_scale_k,
+                                     expected_scale_v, ambiguous);
+            }
+        }
+    }
+
+    ops::kv_cache_append(k, v, position_tensor, cache, nullptr);
+    cuda_synchronize();
+
+    const std::string label = std::string("kv_cache_append full ") +
+                              rotated_storage_name(storage) +
+                              " Hkv=" + std::to_string(kv_heads) + " T=" + std::to_string(tokens) +
+                              " P=" + std::to_string(first_position);
+    int failures = verify_rotated_keys(label + " k codes",
+                                       from_device<std::uint8_t>(cache_k.data(), k_code_count),
+                                       expected_k, ambiguous);
+    failures += verify_exact((label + " v codes").c_str(),
+                             from_device<std::uint8_t>(cache_v.data(), v_code_count), expected_v);
+    failures += verify_exact((label + " k scales").c_str(),
+                             from_device<std::uint16_t>(scale_k.data(), k_scale_count),
+                             expected_scale_k);
+    failures += verify_exact((label + " v scales").c_str(),
+                             from_device<std::uint16_t>(scale_v.data(), v_scale_count),
+                             expected_scale_v);
+    failures += cache_k.verify_guards((label + " k guards").c_str());
+    failures += cache_v.verify_guards((label + " v guards").c_str());
+    failures += scale_k.verify_guards((label + " k scale guards").c_str());
+    failures += scale_v.verify_guards((label + " v scale guards").c_str());
+    return failures;
+}
+#endif // NINFER_SM89
 
 int full_append_case(int kv_heads, KvCacheStorage storage, int tokens = 3) {
     const TestCacheLayout layout = test_cache_layout(storage);
@@ -1406,6 +1722,16 @@ int main(int argc, char** argv) {
         failures += full_append_case(kv_heads, KvCacheStorage::Fp8KeyNvfp4Value);
 #endif
     }
+#if defined(NINFER_SM89)
+    // Rotated sm_89 family. Both append routes are covered: T<32 takes the per-unit kernel and
+    // T>=32 the eight-token page-tiled kernel.
+    for (const KvCacheStorage storage : {KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
+                                         KvCacheStorage::RotatedInt4KeyInt4ValueGroup64,
+                                         KvCacheStorage::RK4V4E8, KvCacheStorage::RK2V4E8}) {
+        for (const int kv_heads : {4, 2}) { failures += rotated_append_case(kv_heads, storage); }
+        failures += rotated_append_case(2, storage, 129);
+    }
+#endif
     failures += full_append_case(2, KvCacheStorage::Int8Group64, 129);
     failures += full_append_case(2, KvCacheStorage::Fp8E4M3Row256, 129);
 #if !defined(NINFER_SM89)

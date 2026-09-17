@@ -223,6 +223,8 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--device N` | CUDA device index | `0` |
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
 | `--kv-dtype rk4v4\|rk4v4-e8` | rotated 4-bit keys and 4-bit values; `rk4v4-e8` projects the rotated keys onto the E8 Conway-Sloane lattice; sm_89 builds only | `bf16` |
+| `--kv-dtype rk8v4` | Hadamard-rotated 8-bit keys and 4-bit values (400 B per token/head at head_dim 256); sm_89 builds only | `bf16` |
+| `--kv-dtype rk2v4-e8` | 2-bit E8 cylinder keys and 4-bit values (208 B per token/head at head_dim 256); sm_89 builds only | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..15`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
@@ -270,8 +272,13 @@ on one RTX 5090 depends on the selected artifact, media workload, output budget,
 The artifact describes its model configuration and weight representations;
 `--kv-dtype` independently selects runtime KV storage. `rk4v4` stores Hadamard-rotated 4-bit keys
 and 4-bit values with one FP16 scale per group of 64 dimensions; `rk4v4-e8` keeps that layout and
-additionally projects the rotated keys onto the E8 Conway-Sloane lattice. Only the sm_89 attention
-and KV kernels implement the two packed int4 modes, so startup planning rejects them on any other
+additionally projects the rotated keys onto the E8 Conway-Sloane lattice. `rk8v4` keeps the same
+rotation and 4-bit values but stores 8-bit keys, trading 128 extra bytes per token and head for
+the highest key fidelity of the rotated family. `rk2v4-e8` goes the other way and factorizes each
+rotated 8-dimension key sub-vector into an 8-bit index over the 240 minimal E8 roots, a 4-bit
+log-scale radius and a 4-bit residual hyperoctahedral axis, which is the smallest KV footprint
+the engine offers. Only the sm_89 attention
+and KV kernels implement the rotated modes, so startup planning rejects them on any other
 compute capability. The prepared prompt must fit
 `--max-context`; generation stops at the remaining context capacity when necessary.
 `--kv-capacity N` controls the shared physical Main Text KV pool independently and is rounded up to

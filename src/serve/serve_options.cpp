@@ -56,6 +56,8 @@ KvCacheStorage parse_kv_dtype(const char* text) {
     // rechaza el arranque en otra arquitectura (ver validate_target_options).
     if (value == "rk4v4") { return KvCacheStorage::RotatedInt4KeyInt4ValueGroup64; }
     if (value == "rk4v4-e8") { return KvCacheStorage::RK4V4E8; }
+    if (value == "rk8v4") { return KvCacheStorage::RotatedInt8KeyInt4ValueGroup64; }
+    if (value == "rk2v4-e8") { return KvCacheStorage::RK2V4E8; }
     throw std::invalid_argument("invalid kv-dtype: " + value);
 }
 
@@ -82,7 +84,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--max-long-anchors-per-continuation N] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
-           "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|rk4v4-e8] "
+           "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] "
            "[--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
@@ -104,8 +106,9 @@ std::string serve_usage_text(const char* argv0) {
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
            "       --vision-max-tokens sets the Vision scratchpad token capacity (default 8192)\n"
-           "       --kv-dtype rk4v4 and rk4v4-e8 store rotated int4 keys and int4 values and "
-           "require an sm_89 build\n"
+           "       --kv-dtype rk8v4 stores rotated int8 keys with int4 values; rk4v4 and "
+           "rk4v4-e8 store rotated int4 keys and int4 values; rk2v4-e8 stores 2-bit E8 "
+           "cylinder keys with int4 values; all require an sm_89 build\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"
