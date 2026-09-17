@@ -225,6 +225,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--kv-dtype rk4v4\|rk4v4-e8` | rotated 4-bit keys and 4-bit values; `rk4v4-e8` projects the rotated keys onto the E8 Conway-Sloane lattice; sm_89 builds only | `bf16` |
 | `--kv-dtype rk8v4` | Hadamard-rotated 8-bit keys and 4-bit values (400 B per token/head at head_dim 256); sm_89 builds only | `bf16` |
 | `--kv-dtype rk2v4-e8` | 2-bit E8 cylinder keys and 4-bit values (208 B per token/head at head_dim 256); sm_89 builds only | `bf16` |
+| `--prefill-a8 fp8\|off` | admit the sm_89 E4M3 prefill routes of the groupwise Q4/Q5 projections (per-token activation quantization; weights stay exact). See [Ada FP8 prefill](maintainer/ada-fp8-prefill.md) | `off` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..15`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |

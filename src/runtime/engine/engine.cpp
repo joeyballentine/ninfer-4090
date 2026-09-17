@@ -1,5 +1,7 @@
 #include "ninfer/engine.h"
 
+#include "ninfer/ops/linear.h"
+
 #include "core/device.h"
 #include "core/nvtx.h"
 #include "core/startup.h"
@@ -159,6 +161,9 @@ public:
     explicit Impl(EngineOptions engine_options)
         : options(runtime::normalize_engine_options(std::move(engine_options))),
           device(initialize_device(options)) {
+        // Route-selection input, not a semantic parameter. It has to be set before model
+        // construction, because Linear route selection also sizes the planned workspace.
+        ops::set_prefill_a8_routes_enabled(options.prefill_a8 == PrefillA8::Fp8);
         nvtx::ScopedRange load_range(nvtx::Name::EngineLoad, nvtx::Category::Runtime);
         auto constructed  = runtime::construct_model(options, device);
         active            = std::move(constructed.instance);

@@ -48,6 +48,7 @@ struct Options {
     std::uint32_t stride                = 2048;
     int device                          = 0;
     ninfer::KvCacheStorage kv           = ninfer::KvCacheStorage::Fp8E4M3Row256;
+    ninfer::PrefillA8 prefill_a8        = ninfer::PrefillA8::Off;
     bool quick                          = false;
     ninfer::product::LogLevel log_level = ninfer::product::LogLevel::Info;
 };
@@ -56,7 +57,8 @@ std::string usage_text() {
     return "usage: ninfer-perplexity <model.ninfer> "
            "(--corpus <manifest.json> [--quick] | --text <utf8-file>)\n"
            "       [--context N] [--stride N] [--device N]\n"
-           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--output <directory>]\n"
+           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--prefill-a8 fp8|off]\n"
+           "       [--output <directory>]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n";
 }
 
@@ -115,6 +117,15 @@ Options parse_options(int argc, char** argv) {
                 out.kv = ninfer::KvCacheStorage::Fp8KeyNvfp4Value;
             } else {
                 usage_error("--kv-dtype must be bf16, int8, fp8, nvfp4, or k8v4");
+            }
+        } else if (option == "--prefill-a8") {
+            const std::string_view profile = value("--prefill-a8");
+            if (profile == "off") {
+                out.prefill_a8 = ninfer::PrefillA8::Off;
+            } else if (profile == "fp8") {
+                out.prefill_a8 = ninfer::PrefillA8::Fp8;
+            } else {
+                usage_error("--prefill-a8 must be fp8 or off");
             }
         } else if (option == "--output") {
             out.output = std::filesystem::path(value("--output"));
@@ -219,6 +230,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.device           = options.device;
     engine_options.max_context      = options.context;
     engine_options.kv_cache         = options.kv;
+    engine_options.prefill_a8       = options.prefill_a8;
     engine_options.startup_observer = startup_log.observer();
     ninfer::Engine engine(std::move(engine_options));
     const ninfer::LoadSummary load = engine.load_summary();

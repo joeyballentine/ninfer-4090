@@ -72,6 +72,12 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
     return KvCapacityPolicy::explicit_capacity(parse_u32(text, "kv-capacity"));
 }
 
+PrefillA8 parse_prefill_a8(std::string_view text) {
+    if (text == "off") { return PrefillA8::Off; }
+    if (text == "fp8") { return PrefillA8::Fp8; }
+    throw std::invalid_argument("invalid prefill-a8: " + std::string(text));
+}
+
 ReasoningEffort parse_reasoning_effort(std::string_view text) {
     if (text == "none") { return ReasoningEffort::None; }
     if (text == "minimal") { return ReasoningEffort::Minimal; }
@@ -99,7 +105,7 @@ std::string usage_text(const char* argv0) {
            "       [--chat-template FILE]\n"
            "       [--raw-output] [--print-token-ids] [--no-thinking] [--thinking-budget N]\n"
            "       [--reasoning-effort none|minimal|low|medium|high|xhigh|max] [--vision]\n"
-           "       [--no-cuda-graph] [--wddm-evictable-budget]\n"
+           "       [--no-cuda-graph] [--wddm-evictable-budget] [--prefill-a8 fp8|off]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "\n"
            "Streams answer content to stdout and reasoning plus diagnostics to stderr.\n"
@@ -109,6 +115,8 @@ std::string usage_text(const char* argv0) {
            "--kv-dtype rk8v4 stores rotated int8 keys with int4 values; rk4v4 and rk4v4-e8 "
            "store rotated int4 keys and int4 values; rk2v4-e8 stores 2-bit E8 cylinder "
            "keys with int4 values; all require an sm_89 build.\n"
+           "--prefill-a8 fp8 admits the sm_89 E4M3 prefill routes of the groupwise weights "
+           "(activation quantized per token, weights exact); default off.\n"
            "--wddm-evictable-budget budgets runtime memory against total VRAM on dedicated "
            "GPUs, ignoring the WDDM process budget (Windows only).\n"
            "--thinking-budget caps model-origin thinking tokens; inserted control tokens count "
@@ -156,6 +164,8 @@ Options parse_options(int argc, char** argv) {
             options.device = parse_device(value(arg));
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_cache(value(arg));
+        } else if (arg == "--prefill-a8") {
+            options.prefill_a8 = parse_prefill_a8(value(arg));
         } else if (arg == "--spec") {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {

@@ -47,6 +47,16 @@ enum class KvCacheStorage : std::uint8_t {
     RK2V4E8,
 };
 
+// Private activation profile for the prefill contraction of the groupwise row-split weights.
+// `Off` leaves every projection on its A16 route. `Fp8` additionally admits the sm_89 E4M3
+// prefill routes where they are registered; it changes no contract, only which private kernel
+// runs. Default off until the code-domain perplexity delta is measured
+// (docs/maintainer/ada-fp8-prefill.md).
+enum class PrefillA8 : std::uint8_t {
+    Off,
+    Fp8,
+};
+
 enum class EnginePurpose : std::uint8_t {
     Generation,
     CausalScoring,
@@ -181,6 +191,7 @@ struct EngineOptions {
     // Tope de tokens del scratchpad de visión (el frontend rechaza medios mayores).
     std::uint32_t vision_max_tokens        = 8192;
     bool use_cuda_graph                    = true;
+    PrefillA8 prefill_a8                   = PrefillA8::Off;
     // Opt-in aggressive WDDM memory budgeting against total VRAM on dedicated GPUs (Windows
     // only): budgets runtime capacity from physical device capacity minus static weights and a
     // minimum eviction floor, instead of the WDDM process budget reported by cudaMemGetInfo.

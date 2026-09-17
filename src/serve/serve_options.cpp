@@ -61,6 +61,12 @@ KvCacheStorage parse_kv_dtype(const char* text) {
     throw std::invalid_argument("invalid kv-dtype: " + value);
 }
 
+PrefillA8 parse_prefill_a8(const std::string& value) {
+    if (value == "off") { return PrefillA8::Off; }
+    if (value == "fp8") { return PrefillA8::Fp8; }
+    throw std::invalid_argument("invalid prefill-a8: " + value);
+}
+
 KvCapacityPolicy parse_kv_capacity(const char* text) {
     if (std::string_view(text) == "auto") { return KvCapacityPolicy::automatic(); }
     const int value = parse_nonnegative_int(text, "kv-capacity");
@@ -85,6 +91,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] "
+           "[--prefill-a8 fp8|off] "
            "[--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
@@ -109,6 +116,8 @@ std::string serve_usage_text(const char* argv0) {
            "       --kv-dtype rk8v4 stores rotated int8 keys with int4 values; rk4v4 and "
            "rk4v4-e8 store rotated int4 keys and int4 values; rk2v4-e8 stores 2-bit E8 "
            "cylinder keys with int4 values; all require an sm_89 build\n"
+           "       --prefill-a8 fp8 admits the sm_89 E4M3 prefill routes of the groupwise "
+           "weights (activation quantized per token, weights exact); default off\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"
@@ -276,6 +285,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.device = parse_nonnegative_int(require_value("--device"), "device");
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_dtype(require_value("--kv-dtype"));
+        } else if (arg == "--prefill-a8") {
+            options.prefill_a8 = parse_prefill_a8(require_value("--prefill-a8"));
         } else if (arg == "--spec") {
             options.speculative.backend =
                 product::parse_speculative_backend(require_value("--spec"));

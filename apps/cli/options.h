@@ -26,6 +26,8 @@ struct Options {
     int device                   = 0;
 
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
+    // Private prefill activation profile; see EngineOptions::prefill_a8.
+    PrefillA8 prefill_a8 = PrefillA8::Off;
     SpeculativeOptions speculative;
     bool enable_vision  = false;
     bool use_cuda_graph = true;
