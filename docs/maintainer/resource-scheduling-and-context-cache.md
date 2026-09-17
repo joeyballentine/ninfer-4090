@@ -520,6 +520,10 @@ capture 一侧**不能**在 I/O 线程上触碰 ProgramImpl：
   pinned 的 host 内存 memcpy 进 staging，不发起任何 CUDA 调用，也不修改 Program 状态；
 - `end_capture` 只标记完成，实际解钉在 Engine worker 的下一次维护步里做。
 
+拆除顺序由此固定：先 `attach_disk_tier(nullptr, {})` 断开，再析构 `ContextDiskTier`（它 join I/O 线程，
+正在写的 record 写完并发布，未开始的 spill 被丢弃），最后才析构 Program。反过来会让 I/O 线程读到已经
+释放的 pinned host 内存。
+
 由此得到一条策略：只有 **State 与 KV 都已经 host-resident** 的 checkpoint 才会被 offer。Device-only
 的副本要回读就得占用 decode round 正在用的 transfer stream，这正是 §5.3 开头拒绝它的理由；把同样的
 规则扩展到 KV 页，capture 一侧就完全不需要 transfer stream 与 event 同步。restore 一侧运行在 Engine
