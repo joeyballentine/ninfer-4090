@@ -7,6 +7,12 @@ ninfer_cuda_archive(ninfer_ops)
 # format needs kind::f8f6f4, and the warp-specialized NVFP4 attention needs setmaxnreg; none of
 # these exist on sm_89. Each family excludes its own Blackwell sources on a non-120 build and the
 # two stub units below keep the dispatch layer linkable with a clear runtime error instead.
+if(CMAKE_CUDA_ARCHITECTURES MATCHES "89")
+  set(NINFER_OPS_SM89 ON)
+else()
+  set(NINFER_OPS_SM89 OFF)
+endif()
+
 if(CMAKE_CUDA_ARCHITECTURES MATCHES "^120")
   set(NINFER_OPS_SM120 ON)
 else()
