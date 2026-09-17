@@ -62,6 +62,52 @@ These names select conversion choices. Runtime execution is selected from the ar
 configuration and actual bindings stored in the artifact. `--name` sets the public model name;
 it does not select kernels.
 
+## Maintained deployment recipes
+
+`official_recipes.py` holds the conversions behind the published model cards and their checksums.
+[`tools/convert/recipes/`](../tools/convert/recipes/) holds maintained recipes that target a
+deployment instead, may depend on calibration data you produce, and are selected by file path:
+
+| Recipe file | Target |
+|---|---|
+| [`qwen3_8_27b_24gb.py`](../tools/convert/recipes/qwen3_8_27b_24gb.py) | Qwen3.8-27B on one 24 GB card, tuned for coding accuracy |
+
+`qwen3_8_27b_24gb` starts from `qwen3_8_27b` and changes only the Text representation:
+
+- the 248,320 x 5,120 token embedding moves from Q8 to Q6. The embedding is a gather, not a matmul,
+  so the narrower codes cost no arithmetic, and the artifact loses 357,780,480 bytes: 1.258 GiB at
+  Q8 against 0.925 GiB at Q6. On a card where the official 19.03 GiB artifact leaves little room,
+  that third of a gibibyte goes to KV pages and workspace. The official `qwen3_6_27b` conversion
+  already stores both vocabulary matrices at Q6, and the runtime carries the Q6 embedding gather
+  and the Q6 `n248320_k5120` linear shape;
+- the output head stays at Q8, where full-vocabulary logit margins are worth the bytes;
+- every Q4 and Q5 Text-layer projection selects its codes with `grouped_mse`, or with
+  `grouped_gptq` when `--calibration` supplies Hessians.
+
+Vision, MTP and DFlash2 keep the official assignments.
+
+```bash
+python3 tools/calibrate_hessians.py \
+  --model /path/to/Qwen3.8-27B \
+  --corpus /path/to/calibration.txt \
+  --out out/qwen3_8_27b-hessians
+
+python3 -m tools.convert \
+  --model /path/to/Qwen3.8-27B \
+  --recipe tools/convert/recipes/qwen3_8_27b_24gb.py \
+  --calibration out/qwen3_8_27b-hessians \
+  --source dflash2=/path/to/Qwen3.8-27B-DFlash2 \
+  --components text,vision,mtp,dflash2 \
+  --resource chat_template.jinja=tools/chat_templates/qwen3_8.jinja \
+  --proposal \
+  --name qwen3.8-27b \
+  --out models/qwen3_8_27b_24gb.ninfer
+```
+
+Leave out `--calibration` to use `grouped_mse` everywhere, which needs no corpus and no
+`transformers`. Conversion itself is unchanged otherwise; see
+[Evaluate a quantization choice](#evaluate-a-quantization-choice) for comparing the results.
+
 For a Qwen3.8-27B NVFP4/FP8 artifact with DFlash2:
 
 ```bash
@@ -152,7 +198,7 @@ The converter currently writes these formats:
 | Format | Built-in method for floating-point input | Import of already encoded input |
 |---|---|---|
 | `bf16`, `fp32`, `int32` | `cast_direct` | Direct words through the source reader |
-| `q4_g64_fp16`, `q5_g64_fp16`, `q6_g64_fp16`, `q8_g32_fp16` | `grouped_absmax` | Supply a custom method/source if needed |
+| `q4_g64_fp16`, `q5_g64_fp16`, `q6_g64_fp16`, `q8_g32_fp16` | `grouped_absmax`, `grouped_mse`, `grouped_gptq` | Supply a custom method/source if needed |
 | `fp8_e4m3fn_row_bf16` | `fp8_row_maxabs` | `import_encoded` |
 | `nvfp4` | Supply a custom quantizer | `import_encoded` |
 
@@ -160,6 +206,85 @@ The converter currently writes these formats:
 rounds input values to BF16, then produces E4M3FN codes and one BF16 multiplier per row.
 `import_encoded` preserves compatible code and scale words, including NVFP4's matrix weight divisor.
 It does not dequantize and requantize them.
+
+`grouped_mse` and `grouped_gptq` write exactly the words `grouped_absmax` writes: int8 codes in the
+format's range and one canonical binary16 scale per group. Only the choice of those words changes,
+so an artifact using them loads and runs through the same kernels.
+
+### Choose integer codes
+
+| Method | Scale per group | Code selection | Extra input |
+|---|---|---|---|
+| `grouped_absmax` | `absmax / qmax` | Independent round to nearest | None |
+| `grouped_mse` | Search of `absmax * f / qmax` | Independent round to nearest | None |
+| `grouped_gptq` | Absmax or the same search, on error-compensated weights | GPTQ order with error compensation | Calibration Hessians |
+
+`grouped_mse` evaluates 21 clipping factors `f` descending from 1.00 to 0.80, rounds every candidate
+scale through the same binary16 word `grouped_absmax` would store, and keeps the factor with the
+smallest squared reconstruction error in that group. The factors descend from one and ties keep the
+larger factor, so a group whose absmax scale is already optimal reproduces the `grouped_absmax`
+result and no group ends up with a larger error. The search costs one extra pass per candidate and
+needs no calibration data. On random Gaussian weights it removes about 22% of the Q4 squared error
+and 14% of the Q5 squared error; on heavy-tailed weights about 9% and 6%. At Q8 the gain is
+negligible, because 255 levels leave almost nothing to clip.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `candidates` | 21 | Clipping factors searched over `[0.80, 1.00]`; `1` is plain absmax |
+
+`grouped_gptq` implements GPTQ (Frantar et al.): it factors the damped inverse Hessian of the
+calibration activations, sweeps the input columns in blocks of 128 with lazy batch updates, and
+pushes each column's rounding error onto the columns it has not quantized yet. Group scales come
+from the error-compensated weights, with the absmax rule or with the `grouped_mse` search weighted
+by `diag(H)`. With `H = I` the method reduces exactly to `grouped_absmax`, codes and scales
+included; that identity is a test.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `calibration` | required | Calibration directory, normally the `--calibration` path |
+| `mse` | `false` | Use the clipping search for the group scales |
+| `candidates` | 21 | Clipping factors when `mse` is set |
+| `block_size` | 128 | Columns per lazy-update block; must divide the padded K |
+| `damping` | 0.01 | Added to `diag(H)` as a fraction of its mean |
+| `act_order` | `false` | Quantize columns by descending `diag(H)` |
+
+`act_order` reorders the sweep but not the storage: the row-split layout needs contiguous groups of
+64 (or 32) original input channels, so act-order runs with static groups, computing the group scales
+from the unpermuted weights and permuting the codes back. It usually helps least where groups are
+already small, so it stays off by default.
+
+A calibration Hessian belongs to one mathematical input, not to one parameter. Attention query and
+key read the same input and share one matrix. A projection with several mathematical inputs, such as
+`text/output_head`, has no single calibration site and is rejected by `grouped_gptq`.
+
+## Calibrate for GPTQ
+
+NInfer has no Python model-inference route, so activation statistics are collected outside the
+converter. `tools/calibrate_hessians.py` runs the Hugging Face reference implementation of the
+checkpoint over a calibration corpus, accumulates `H = sum x x^T` per linear input in FP64, and
+writes them under the logical input names the converter uses. It needs `transformers` and
+`safetensors`; conversion itself does not.
+
+```bash
+python3 tools/calibrate_hessians.py \
+  --model /path/to/Qwen3.8-27B \
+  --corpus /path/to/calibration.txt \
+  --sequence 2048 --sequences 128 \
+  --out out/qwen3_8_27b-hessians
+```
+
+Use a calibration corpus that matches the intended use. For a coding artifact, concatenate source
+files in the languages you work in; 128 sequences of 2,048 tokens is a reasonable starting point.
+The output directory contains `hessians.safetensors`, keyed by input name such as
+`text/layers/17/ffn_input`, and a `manifest.json` recording the model, corpus, token counts per
+input and an optional `sites` map that lets several inputs share one stored matrix. A directory of
+`<input name>.npy` files is read as well, so statistics from another tool can be supplied without
+using the script. `--dtype float16` halves the directory size; the converter upcasts to FP32.
+
+Pass the directory to conversion with `--calibration DIR`. Recipes that declare a `calibration`
+keyword parameter receive it; supplying it to a recipe that does not accept it is an error rather
+than a silent omission.
+
 
 The exact numeric and packing rules are in [numeric formats](maintainer/tensor-formats.md) and
 [storage layouts](maintainer/storage-layouts.md). Source format names alone do not establish
@@ -334,6 +459,32 @@ including explicit groups. `output.write_codes` performs the registered packing 
 codes/scales; the method should not duplicate that byte-layout logic. Direct output uses
 `output.write_values`. Keep source blocks and temporary device tensors bounded to the method's
 working set. `--rows-per-chunk` defaults to 512; custom methods own how they use it.
+
+## Evaluate a quantization choice
+
+Code selection changes numerical results, not the artifact's execution route, so compare artifacts
+with [`ninfer-perplexity`](perplexity.md) on the fixed corpus. Build the alternatives from the same
+checkpoint, with the same components and the same recipe except for the method being measured:
+
+```bash
+./build/apps/ninfer-perplexity models/qwen3_8_27b_absmax.ninfer \
+  --corpus eval/corpora/perplexity-1m/manifest.json \
+  --kv-dtype int8 \
+  --output profiles/perplexity/absmax
+```
+
+Repeat it for the `grouped_mse` and `grouped_gptq` artifacts, keeping the corpus selection, the
+default 4,096-token context and 2,048-token stride, and `--kv-dtype int8` fixed, because
+`int8` is the KV representation a 24 GB card actually has room for. Each run writes an unrounded
+`report.json` with per-stream, per-domain and overall values.
+
+The corpus reports four domains. For programming use, the number that decides the comparison is the
+NInfer C++/CUDA code domain; the English and Chinese reference domains show whether a calibration
+corpus has skewed the model away from general text. Expect the ordering
+`grouped_absmax` > `grouped_mse` > `grouped_gptq` in perplexity, with the largest gaps at Q4, and
+treat a code-domain regression against `grouped_absmax` as a calibration problem rather than a
+method problem. The Q6 embedding is a separate variable: measure it on its own before combining it
+with a code-selection change.
 
 ## Resources, files and inspection
 
