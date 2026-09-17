@@ -1,7 +1,7 @@
 """Qwen3.8-27B Dense for one 24 GB card, tuned for coding accuracy.
 
 Select it with ``--recipe tools/convert/recipes/qwen3_8_27b_24gb.py``.  It
-starts from the official ``qwen3_8_27b`` conversion and changes three things:
+starts from the official ``qwen3_8_27b`` conversion and changes four things:
 
 - the 248,320 x 5,120 token embedding moves from Q8 to Q6.  The embedding is a
   gather, not a matmul, so its code width costs no arithmetic; it frees
@@ -14,9 +14,20 @@ starts from the official ``qwen3_8_27b`` conversion and changes three things:
   are worth the bytes;
 - every Q4 and Q5 Text-layer projection selects its codes with the clipping
   search instead of the plain group absmax, and with GPTQ when calibration
-  Hessians are supplied.
+  Hessians are supplied;
+- those same projections carry ``activation_policy="AllowA8"`` on their
+  mathematical inputs.
 
-Vision, MTP and DFlash2 assignments are exactly the official ones.
+The policy only *permits* an 8-bit activation route; it selects nothing.  A16
+remains the default compute at every projection, and the sm_89 FP8 prefill
+route additionally requires ``--prefill-a8 fp8`` at startup, a build defining
+``NINFER_SM89`` and a registered geometry (see
+``docs/maintainer/ada-fp8-prefill.md``).  Without the permission the runtime
+switch cannot admit the route at all, which is why it is set here and not in
+the official recipe.  Stored weights are identical either way.
+
+Vision, MTP and DFlash2 assignments are exactly the official ones, and the
+vocabulary matrices keep the default ``A16Only``.
 """
 
 from __future__ import annotations
@@ -52,3 +63,4 @@ def configure(model, recipe, sources, *, calibration=None):
             method="grouped_gptq",
             parameters={"calibration": str(calibration), "mse": True},
         )
+    recipe.assign(names, activation_policy="AllowA8")

@@ -55,6 +55,14 @@ def _chosen(recipe):
     }
 
 
+def _searched_uses(layers=2):
+    return {
+        (f"text/layers/{layer}/{role}", f"text/layers/{layer}/mixer_input")
+        for layer in range(layers)
+        for role, _ in LAYER_PROJECTIONS
+    }
+
+
 def test_official_recipe_keeps_q8_vocabulary_and_absmax() -> None:
     model = _model()
     recipe = Recipe(model)
@@ -65,6 +73,7 @@ def test_official_recipe_keeps_q8_vocabulary_and_absmax() -> None:
     for layer in range(2):
         for role, format in LAYER_PROJECTIONS:
             assert chosen[f"text/layers/{layer}/{role}"] == (format, grouped_absmax)
+    assert set(recipe.policies.values()) == {"A16Only"}
 
 
 def test_24gb_recipe_moves_the_embedding_to_q6_and_searches_codes() -> None:
@@ -83,6 +92,26 @@ def test_24gb_recipe_moves_the_embedding_to_q6_and_searches_codes() -> None:
             assert chosen[prefix + role][0] == "bf16"
 
 
+def test_24gb_recipe_permits_a8_only_on_the_searched_projections() -> None:
+    model = _model()
+    recipe = Recipe(model)
+    configure(model, recipe, {})
+    permitted = {
+        key for key, policy in recipe.policies.items() if policy != "A16Only"
+    }
+    assert permitted == _searched_uses()
+    assert {recipe.policies[key] for key in permitted} == {"AllowA8"}
+    assert recipe.policies[("text/output_head", "text/final_hidden")] == "A16Only"
+    assert (
+        recipe.policies[("mtp/layers/0/mlp/down", "mtp/layers/0/mlp/product")]
+        == "A16Only"
+    )
+    for layer in range(2):
+        prefix = f"text/layers/{layer}/"
+        for role in ("gdn/a_projection", "gdn/b_projection"):
+            assert recipe.policies[(prefix + role, prefix + "mixer_input")] == "A16Only"
+
+
 def test_24gb_recipe_uses_gptq_when_calibration_is_supplied(tmp_path) -> None:
     model = _model()
     recipe = Recipe(model)
@@ -99,3 +128,5 @@ def test_24gb_recipe_uses_gptq_when_calibration_is_supplied(tmp_path) -> None:
                 "calibration": str(tmp_path),
                 "mse": True,
             }
+    permitted = {key for key, policy in recipe.policies.items() if policy != "A16Only"}
+    assert permitted == _searched_uses()
