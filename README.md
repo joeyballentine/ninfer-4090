@@ -51,9 +51,20 @@ What changes on `sm_89`:
   `qwen3_6_35b_a3b.ninfer`). The `nvfp4` artifacts need Blackwell FP4 tensor cores; on Ada the
   NVFP4 W4A4 routes and the `nvfp4` / `k8v4` KV cache modes are compiled as stubs that fail with
   a clear error at startup.
-- Two extra KV cache modes fit long contexts in 24 GB: `--kv-dtype rk4v4` (Hadamard-rotated 4-bit
-  keys and values) and `--kv-dtype rk4v4-e8` (4-bit keys on the E8 Conway-Sloane lattice, higher
-  key fidelity). `int8` remains the highest-precision choice when the context fits.
+- Four extra KV cache modes fit long contexts in 24 GB, all sm_89 only: `--kv-dtype rk8v4`
+  (Hadamard-rotated 8-bit keys, 4-bit values; the recommended coding mode below about 200k
+  tokens), `rk4v4` (rotated 4-bit keys and values), `rk4v4-e8` (4-bit keys on the E8 Conway-Sloane
+  lattice, higher key fidelity than `rk4v4`) and `rk2v4-e8` (2-bit E8 cylinder keys for 350k+
+  token contexts). `int8` remains the highest-precision choice when the context fits and now
+  stores keys under the same D256 rotation contract as the RTX 5090 build.
+- Speculation for code: `--spec mtp --draft-tokens K` accepts K up to 15, and MTP additionally
+  drafts by prompt lookup (repeated n-grams from the sequence's own history) whenever the head has
+  no proposal. DFlash2 (`--spec dflash2`) is available with artifacts that carry the companion
+  weights.
+- Serving: `response_format` (`json_object`, `json_schema`) and Responses `text.format` are
+  enforced by grammar-constrained sampling (xgrammar, `NINFER_ENABLE_STRUCTURED_OUTPUT=ON`), with
+  speculation kept on; `GET /metrics` exposes Prometheus counters and `GET /slots` the executor
+  lanes; an omitted `--default-max-tokens` resolves to `--max-context`.
 - On Windows, `--wddm-evictable-budget` lets a GPU that does not drive the desktop budget against
   total VRAM minus a 512 MiB display floor. `--vision-max-tokens` caps the Vision workspace
   (default 8192 tokens). `--tolerant-tool-calls` accepts complete Qwen tool calls followed by
