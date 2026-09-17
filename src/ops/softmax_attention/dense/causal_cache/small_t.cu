@@ -49,7 +49,8 @@ std::int32_t causal_small_t_split_count(std::int32_t window, std::int32_t tokens
     // La familia int8 (incluida la packed int4/E8 del build sm_89) comparte el perfil de splits.
     const bool int8_family = storage == KvCacheStorage::Int8Group64 ||
                              storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
-                             storage == KvCacheStorage::RK4V4E8;
+                             storage == KvCacheStorage::RK4V4E8 ||
+                             storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64;
     if constexpr (Geometry::SmallTSplitScale == 1) {
         if (storage == KvCacheStorage::Fp8E4M3Row256 && tokens == 1 && window > 8198) {
             return Geometry::SmallTMaximumSplits;
@@ -385,6 +386,12 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
                                     MultiBatch, Masked>(                                           \
                     q, input, pos, scale, cache, invocation, logical_capacity,                     \
                     implementation_window, splits, partial_acc, partial_m, partial_l, stream);     \
+            } else if (cache.storage ==                                                            \
+                       KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {                           \
+                launch_tc_partial_i8<Geometry, (TOKENS), true, true, true, false, false, false,    \
+                                    MultiBatch, Masked>(                                           \
+                    q, input, pos, scale, cache, invocation, logical_capacity,                     \
+                    implementation_window, splits, partial_acc, partial_m, partial_l, stream);     \
             } else if (cache.storage == KvCacheStorage::Int8Group64) {                             \
                 launch_tc_partial_i8<Geometry, (TOKENS), false, false, false, false, false, false, \
                                     MultiBatch, Masked>(                                           \
@@ -543,15 +550,17 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
     };
     if (cache.storage == KvCacheStorage::Int8Group64 ||
         cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
-        cache.storage == KvCacheStorage::RK4V4E8)
+        cache.storage == KvCacheStorage::RK4V4E8 ||
+        cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64)
         launch_for_storage.template operator()<true>();
     else
         launch_for_storage.template operator()<false>();
     CUDA_CHECK(cudaGetLastError());
-    // Los modos con V rotada (rk4v4 / rk4v4-e8, solo sm_89) devuelven el PV al espacio
+    // Los modos con V rotada (rk8v4 / rk4v4 / rk4v4-e8, solo sm_89) devuelven el PV al espacio
     // original con la inversa de la rotacion H64 (self-inverse).
     if (cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
-        cache.storage == KvCacheStorage::RK4V4E8) {
+        cache.storage == KvCacheStorage::RK4V4E8 ||
+        cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {
         const int units = invocation.batch_size * invocation.width * Geometry::QHeads *
                           kKVCacheInt8Groups;
         kv_cache_inverse_rotate_output_kernel<Geometry::QHeads><<<units, 32, 0, stream>>>(

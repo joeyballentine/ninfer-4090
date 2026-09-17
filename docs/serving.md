@@ -776,6 +776,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
 | `--kv-dtype rk4v4\|rk4v4-e8` | rotated 4-bit keys and 4-bit values; `rk4v4-e8` projects the rotated keys onto the E8 Conway-Sloane lattice; sm_89 builds only | `bf16` |
+| `--kv-dtype rk8v4` | Hadamard-rotated 8-bit keys and 4-bit values (400 B per token/head at head_dim 256); sm_89 builds only | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
@@ -805,9 +806,9 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--greedy` | force exact argmax for all requests | off |
 | `--wddm-evictable-budget` | budget runtime memory against total VRAM instead of the WDDM process budget (Windows only) | off |
 
-`--kv-dtype rk4v4` and `--kv-dtype rk4v4-e8` are implemented only by the sm_89 attention and KV
-kernels; startup fails on any other compute capability. `--wddm-evictable-budget` has no effect
-outside Windows.
+`--kv-dtype rk8v4`, `--kv-dtype rk4v4` and `--kv-dtype rk4v4-e8` are implemented only by the sm_89
+attention and KV kernels; startup fails on any other compute capability.
+`--wddm-evictable-budget` has no effect outside Windows.
 
 Context-cost coefficients resolve once at startup from generic defaults, matching compiled values,
 and optional transfer or prefill entries from `--context-cost-presets FILE`. Prefill entries match

@@ -52,10 +52,11 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
         return;
     }
 #if defined(NINFER_SM89)
-    // Llenado i8 del fork sergiuszm/ninfer-4090: rk4v4 / rk4v4-e8 / int8 plano.
+    // Llenado i8 del fork sergiuszm/ninfer-4090: rk8v4 / rk4v4 / rk4v4-e8 / int8 plano.
     // (El dispatch de flags del donante se mapea sobre el enum KvCacheStorage.)
     if (cache.storage == KvCacheStorage::RK4V4E8 ||
         cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
+        cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
         cache.storage == KvCacheStorage::Int8Group64) {
         Tensor& cache_k_scale = cache.k_scale_pages;
         Tensor& cache_v_scale = cache.v_scale_pages;
@@ -100,6 +101,9 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
             launch_fill.template operator()<true, true, true, true, true, false>();
         } else if (cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64) {
             launch_fill.template operator()<true, true, true, true, false, false>();
+        } else if (cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {
+            // rk8v4: K int8 rotada (PackedK=false), V int4 rotada (PackedV=true).
+            launch_fill.template operator()<true, true, true, false, false, false>();
         } else {
             launch_fill.template operator()<false, false, false, false, false, false>();
         }

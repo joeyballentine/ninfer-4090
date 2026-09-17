@@ -37,6 +37,7 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
     // Kernel i8 del fork sergiuszm/ninfer-4090 (modos packed int4 / E8).
     if (cache.storage == KvCacheStorage::RK4V4E8 ||
         cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
+        cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
         cache.storage == KvCacheStorage::Int8Group64) {
         const dim3 attention_grid(static_cast<unsigned>(div_up(tokens, kCausalPromptI8Br)),
                                   static_cast<unsigned>(Geometry::QHeads), 1u);
@@ -65,6 +66,9 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
         if (cache.storage == KvCacheStorage::RK4V4E8 ||
             cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64) {
             launch_i8.template operator()<true, true, true, true, false>();
+        } else if (cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {
+            // rk8v4: K int8 rotada (PackedK=false), V int4 rotada (PackedV=true).
+            launch_i8.template operator()<true, true, true, false, false>();
         } else {
             launch_i8.template operator()<false, false, false, false, false>();
         }
@@ -80,10 +84,11 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
                 static_cast<__nv_bfloat16*>(out.data), tokens);
     }
     CUDA_CHECK(cudaGetLastError());
-    // Los modos con V rotada (rk4v4 / rk4v4-e8) devuelven el PV al espacio original
+    // Los modos con V rotada (rk8v4 / rk4v4 / rk4v4-e8) devuelven el PV al espacio original
     // con la inversa de la rotacion H64 (self-inverse).
     if (cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
-        cache.storage == KvCacheStorage::RK4V4E8) {
+        cache.storage == KvCacheStorage::RK4V4E8 ||
+        cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {
         kv_cache_inverse_rotate_output_kernel<Geometry::QHeads>
             <<<tokens * Geometry::QHeads * kKVCacheInt8Groups, 32, 0, stream>>>(
                 static_cast<__nv_bfloat16*>(out.data), tokens, tokens, 0, nullptr);

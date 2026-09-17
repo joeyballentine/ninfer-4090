@@ -38,6 +38,9 @@ enum class KvCacheStorage : std::uint8_t {
     // a la retícula E8 (Conway-Sloane) en el dominio rotado. Planes U8 + escalas FP16/64.
     RotatedInt4KeyInt4ValueGroup64,
     RK4V4E8,
+    // Fork-local (port desde sergiuszm/ninfer-4090): K en int8 rotado por H64 por grupo-64 y V
+    // en int4 (dos códigos por byte). 264 B de K + 136 B de V por token/head en D=256.
+    RotatedInt8KeyInt4ValueGroup64,
 };
 
 enum class EnginePurpose : std::uint8_t {
