@@ -34,10 +34,12 @@ public:
         std::filesystem::remove_all(path_);
         std::filesystem::create_directories(path_);
     }
+
     ~TempDirectory() {
         std::error_code code;
         std::filesystem::remove_all(path_, code);
     }
+
     [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
 
 private:
@@ -77,13 +79,14 @@ public:
     explicit FakePort(std::uint32_t batch) : batch_(batch) {}
 
     // --- test-facing state -------------------------------------------------------------------
-    std::map<std::uint64_t, FakeCheckpoint> slots;      // host state slots available to capture
-    std::map<std::uint64_t, FakeCheckpoint> restored;   // destinations filled by a restore
-    std::uint64_t restore_destination = 0;
-    std::uint32_t largest_capture_batch = 0;
-    std::uint32_t largest_restore_batch = 0;
-    std::uint64_t captures_ended_published = 0;
+    std::map<std::uint64_t, FakeCheckpoint> slots;    // host state slots available to capture
+    std::map<std::uint64_t, FakeCheckpoint> restored; // destinations filled by a restore
+    std::uint64_t restore_destination        = 0;
+    std::uint32_t largest_capture_batch      = 0;
+    std::uint32_t largest_restore_batch      = 0;
+    std::uint64_t captures_ended_published   = 0;
     std::uint64_t captures_ended_unpublished = 0;
+    std::vector<std::uint64_t> dropped_captures;
     bool fail_next_restore_commit = false;
     bool refuse_next_restore      = false;
 
@@ -125,6 +128,12 @@ public:
         } else {
             ++captures_ended_unpublished;
         }
+    }
+
+    // Every offered spill the tier will not capture has to come back, or the Program-side port
+    // would keep the checkpoint's Host replicas pinned forever.
+    void drop_capture(std::uint64_t owner_token) noexcept override {
+        dropped_captures.push_back(owner_token);
     }
 
     [[nodiscard]] std::optional<DiskCheckpointGeometry>
@@ -171,7 +180,7 @@ public:
     void end_restore(bool) noexcept override { target_ = nullptr; }
 
 private:
-    std::uint32_t batch_ = 1;
+    std::uint32_t batch_       = 1;
     FakeCheckpoint* capturing_ = nullptr;
     FakeCheckpoint* target_    = nullptr;
     std::vector<std::byte> staging_;
@@ -214,8 +223,7 @@ void test_spill_then_restore() {
     const auto after_spill = tier.stats();
     require(after_spill.spills_published == 1, "the evicted slot was not spilled");
     require(port.captures_ended_published == 1, "the port was not told the capture published");
-    require(after_spill.spilled_bytes ==
-                static_cast<std::uint64_t>(37) * kPageBytes + kStateBytes,
+    require(after_spill.spilled_bytes == static_cast<std::uint64_t>(37) * kPageBytes + kStateBytes,
             "the spilled byte count disagrees with the checkpoint size");
     require(port.largest_capture_batch == 8, "the capture was not batched at the port's bound");
 
@@ -309,6 +317,8 @@ void test_request_priority_drops_only_unstarted_spills() {
             "a spill queued under request priority still ran");
     require(port.captures_ended_published == 0 && port.captures_ended_unpublished == 0,
             "a dropped spill still captured from the port");
+    require(port.dropped_captures == std::vector<std::uint64_t>{1},
+            "a cancelled spill did not release the capture the Engine prepared for it");
 
     tier.clear_request_priority();
     tier.request_spill(DiskSpillRequest{.key = key_for(576), .owner_token = 2});
@@ -326,15 +336,35 @@ void test_queue_bounds() {
     ContextDiskTier tier(config_for(directory.path()), port, 2);
     tier.note_request_arrival(); // hold the worker off so the queue actually fills
     for (std::uint64_t slot = 1; slot <= 6; ++slot) {
-        tier.request_spill(
-            DiskSpillRequest{.key = key_for(static_cast<std::uint32_t>(64 * slot)),
-                             .owner_token = slot});
+        tier.request_spill(DiskSpillRequest{.key = key_for(static_cast<std::uint32_t>(64 * slot)),
+                                            .owner_token = slot});
     }
     tier.drain();
     const auto stats = tier.stats();
     require(stats.spills_requested == 6, "requests were not all counted");
     require(stats.spills_published == 0, "request priority did not hold the queue off");
     require(stats.spills_dropped >= 4, "the queue grew past its bound");
+    // Every offer the tier will not capture has to be handed back, whether it was pushed out of
+    // the queue, cancelled before it started or still queued at teardown. A leaked one would
+    // keep a checkpoint's Host replicas pinned for the rest of the process.
+    require(port.dropped_captures.size() == 6, "the tier kept captures for spills it never ran");
+}
+
+// A second offer for the same prefix supersedes the first, and the first's capture is released.
+void test_superseded_spill_releases_its_capture() {
+    TempDirectory directory("supersede");
+    FakePort port(4);
+    port.slots[1] = make_checkpoint(11, 4);
+    port.slots[2] = make_checkpoint(12, 4);
+    ContextDiskTier tier(config_for(directory.path()), port, 4);
+    tier.note_request_arrival();
+    tier.request_spill(DiskSpillRequest{.key = key_for(128), .owner_token = 1});
+    tier.request_spill(DiskSpillRequest{.key = key_for(128), .owner_token = 2});
+    require(port.dropped_captures == std::vector<std::uint64_t>{1},
+            "the superseded capture was not released");
+    tier.clear_request_priority();
+    tier.drain();
+    require(tier.stats().spills_published == 1, "the surviving spill did not publish");
 }
 
 // The store directory and cap Engine policy implies from the options.
@@ -343,10 +373,13 @@ void test_config_resolution() {
     options.artifact_path        = "/models/qwen3_6_27b.ninfer";
     options.prompt_cache.enabled = true;
     const auto defaulted = resolve_prompt_cache_config(options, "qwen3_6_27b/rk4v4-e8/ctx262144");
-    require(defaulted.directory ==
-                std::filesystem::path("/models") / ".ninfer-cache" /
-                    "qwen3_6_27b-rk4v4-e8-ctx262144",
+    // The directory name keeps a readable head of the signature and appends a digest of the whole
+    // string, so two configurations that agree on a long prefix never share a store.
+    require(defaulted.directory.parent_path() == std::filesystem::path("/models") / ".ninfer-cache",
             "the default store directory is not beside the artifact");
+    require(defaulted.directory.filename().string().rfind("qwen3_6_27b-rk4v4-e8-ctx262144-", 0) ==
+                0,
+            "the default store directory is not named after the signature");
     require(defaulted.signature == "qwen3_6_27b/rk4v4-e8/ctx262144",
             "the signature was rewritten rather than only its path component");
     require(defaulted.max_bytes == ninfer::kDefaultPromptCacheMaxBytes,
@@ -354,7 +387,7 @@ void test_config_resolution() {
 
     options.prompt_cache.directory = "/var/cache/ninfer";
     options.prompt_cache.max_bytes = 4ULL << 30;
-    const auto explicitly = resolve_prompt_cache_config(options, "sig");
+    const auto explicitly          = resolve_prompt_cache_config(options, "sig");
     require(explicitly.directory == std::filesystem::path("/var/cache/ninfer"),
             "an explicit --prompt-cache-dir was not honoured");
     require(explicitly.max_bytes == (4ULL << 30), "an explicit cap was not honoured");
@@ -362,9 +395,7 @@ void test_config_resolution() {
     bool rejected = false;
     try {
         (void)resolve_prompt_cache_config(options, "");
-    } catch (const std::exception&) {
-        rejected = true;
-    }
+    } catch (const std::exception&) { rejected = true; }
     require(rejected, "an empty configuration signature was accepted");
 }
 
@@ -377,6 +408,7 @@ int main() {
         test_missing_slot_and_refused_restore();
         test_request_priority_drops_only_unstarted_spills();
         test_queue_bounds();
+        test_superseded_spill_releases_its_capture();
         test_config_resolution();
         std::cout << "ok\n";
     } catch (const std::exception& error) {

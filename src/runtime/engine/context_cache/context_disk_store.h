@@ -26,6 +26,7 @@
 // so a torn tail can never publish a record whose payload is missing.
 
 #include "core/positional_file.h"
+#include "runtime/contract/context_disk.h"
 
 #include <atomic>
 #include <cstddef>
@@ -39,18 +40,6 @@
 #include <vector>
 
 namespace ninfer::runtime {
-
-// Mirrors the model's `PrefixShortlistKey`: two rolling content digests over the token frontier,
-// the frontier itself and the identity tag that separates incompatible token/position identities.
-// The runtime converts the model key into this one so the disk tier keeps no model dependency.
-struct DiskRecordKey {
-    std::uint64_t digest_low  = 0;
-    std::uint64_t digest_high = 0;
-    std::uint32_t frontier    = 0;
-    std::uint32_t identity_tag = 0;
-
-    [[nodiscard]] friend constexpr bool operator==(DiskRecordKey, DiskRecordKey) noexcept = default;
-};
 
 struct DiskRecordKeyHash {
     [[nodiscard]] std::size_t operator()(const DiskRecordKey& key) const noexcept;
@@ -71,24 +60,6 @@ struct DiskBlobHashHasher {
 };
 
 [[nodiscard]] DiskBlobHash disk_blob_hash(std::span<const std::byte> payload) noexcept;
-
-// What a lookup returns. It is a stable snapshot: the extents it names stay live until the
-// holder releases it, because eviction and compaction only retire unpinned records.
-struct DiskRecordDescriptor {
-    DiskRecordKey key;
-    std::uint32_t page_bytes  = 0;
-    std::uint32_t page_count  = 0;
-    std::uint32_t state_bytes = 0;
-    std::uint64_t payload_bytes = 0;
-    std::uint64_t sequence      = 0;
-};
-
-// Where one payload lives in the extent file. The portable path never needs this - it reads
-// through the store - but a kernel-bypass DMA engine is handed file offsets directly.
-struct DiskExtentLocation {
-    std::uint64_t offset = 0;
-    std::uint64_t bytes  = 0;
-};
 
 struct ContextDiskStoreStats {
     std::uint64_t records           = 0;

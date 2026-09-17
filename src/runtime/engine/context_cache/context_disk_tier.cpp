@@ -66,20 +66,28 @@ ContextDiskTier::ContextDiskTier(ContextDiskStoreConfig config, ContextDiskTrans
 }
 
 ContextDiskTier::~ContextDiskTier() {
+    std::deque<DiskSpillRequest> discarded;
     {
         const std::lock_guard<std::mutex> guard(mutex_);
         running_ = false;
-        queue_.clear();
+        discarded.swap(queue_);
     }
     cancel_.request();
     wake_.notify_all();
     if (worker_.joinable()) { worker_.join(); }
+    // Every queued spill the worker will never see still holds a snapshot the Program pinned for
+    // it. Releasing them here is what lets the Program be destroyed after the tier.
+    for (const DiskSpillRequest& request : discarded) { port_.drop_capture(request.owner_token); }
 }
 
 void ContextDiskTier::request_spill(const DiskSpillRequest& request) {
+    std::optional<std::uint64_t> superseded;
     {
         const std::lock_guard<std::mutex> guard(mutex_);
-        if (!running_) { return; }
+        if (!running_) {
+            port_.drop_capture(request.owner_token);
+            return;
+        }
         ++stats_.spills_requested;
         // Replacing an existing request for the same prefix keeps the queue from holding two
         // captures of the same frontier.
@@ -88,15 +96,20 @@ void ContextDiskTier::request_spill(const DiskSpillRequest& request) {
                 return pending.key == request.key;
             });
         if (duplicate != queue_.end()) {
+            if (duplicate->owner_token != request.owner_token) {
+                superseded = duplicate->owner_token;
+            }
             *duplicate = request;
         } else {
             if (queue_.size() >= queue_depth_) {
+                superseded = queue_.front().owner_token;
                 queue_.pop_front();
                 ++stats_.spills_dropped;
             }
             queue_.push_back(request);
         }
     }
+    if (superseded) { port_.drop_capture(*superseded); }
     wake_.notify_one();
 }
 
@@ -128,6 +141,7 @@ void ContextDiskTier::run_spill(const DiskSpillRequest& request) {
     // Once the extents are on disk the abort would perform the same I/O and then discard the
     // result, which is the failure the donor fixed in 8488278c.
     if (cancel_.requested()) {
+        port_.drop_capture(request.owner_token);
         const std::lock_guard<std::mutex> guard(mutex_);
         ++stats_.spills_dropped;
         return;

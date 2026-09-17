@@ -4,15 +4,16 @@
 //
 // The tier owns when a record is written, when one is read back and how much work either costs.
 // It owns no device memory and no knowledge of what a page contains: every physical transfer
-// goes through `ContextDiskTransferPort`, which the Engine implements over the Program's pinned
-// staging and transfer stream. That split keeps Program as the only physical authority and lets
-// the whole state machine be exercised on a host with no GPU.
+// goes through `ContextDiskTransferPort` (`runtime/contract/context_disk.h`), which the Program
+// implements over the pinned Host replicas it already owns. That split keeps Program as the only
+// physical authority and lets the whole state machine be exercised on a host with no GPU.
 //
 // Transfers are batched. A 77k-token record is on the order of a thousand KV pages; staging the
 // whole record at once is what made the donor fork fail on a 24 GB card (c15e0e9e), so the tier
 // asks the port for `batch_pages()` pages at a time and never holds more.
 
 #include "ninfer/types.h"
+#include "runtime/contract/context_disk.h"
 #include "runtime/engine/context_cache/context_disk_store.h"
 
 #include <condition_variable>
@@ -33,62 +34,6 @@ namespace ninfer::runtime {
 // An empty `options.prompt_cache.directory` selects `<artifact dir>/.ninfer-cache/<signature>`.
 [[nodiscard]] ContextDiskStoreConfig resolve_prompt_cache_config(const EngineOptions& options,
                                                                  std::string_view identity);
-
-struct DiskCheckpointGeometry {
-    std::uint32_t page_bytes  = 0;
-    std::uint32_t page_count  = 0;
-    std::uint32_t state_bytes = 0;
-};
-
-// The physical half of a spill or restore. Every method runs on the tier's I/O thread except
-// the restore methods, which run on the thread that asked for the restore.
-class ContextDiskTransferPort {
-public:
-    virtual ~ContextDiskTransferPort() = default;
-
-    // Upper bound on pages staged at once. The tier never asks for more in one call.
-    [[nodiscard]] virtual std::uint32_t batch_pages() const noexcept = 0;
-
-    // Spill. `owner_token` names the host state slot the Engine is evicting; the port resolves it
-    // against the Program. A disengaged result means the slot is gone and the spill is dropped.
-    [[nodiscard]] virtual std::optional<DiskCheckpointGeometry>
-    begin_capture(std::uint64_t owner_token) = 0;
-    // Returns staging holding `count` consecutive page images, or an empty span on failure.
-    [[nodiscard]] virtual std::span<const std::byte> capture_pages(std::uint32_t first_page,
-                                                                   std::uint32_t count) = 0;
-    [[nodiscard]] virtual std::span<const std::byte> capture_state_image() = 0;
-    virtual void end_capture(bool published) noexcept = 0;
-
-    // Restore. A disengaged result means no destination could be reserved, so the admission path
-    // falls back to prefill.
-    [[nodiscard]] virtual std::optional<DiskCheckpointGeometry>
-    begin_restore(const DiskRecordDescriptor& record) = 0;
-    // Staging the tier reads `count` page images into before the port commits them.
-    [[nodiscard]] virtual std::span<std::byte> restore_staging(std::uint32_t count) = 0;
-    [[nodiscard]] virtual bool commit_pages(std::uint32_t first_page, std::uint32_t count) = 0;
-    [[nodiscard]] virtual bool commit_state_image(std::span<const std::byte> payload) = 0;
-    virtual void end_restore(bool complete) noexcept = 0;
-
-#if defined(_WIN32) && defined(NINFER_DIRECTSTORAGE)
-    // Optional kernel-bypass restore. DirectStorage reads the extent file straight into device
-    // memory, skipping the pinned staging round trip the portable path takes; on the donor fork
-    // that turned a 2.2 GB, 152k-token restore into 367 ms. It is declared here and nowhere
-    // implemented: it needs a Windows SDK, a D3D12 device and a real GPU, none of which this
-    // tree can build or test against. The portable path above is complete without it.
-    //
-    // The lesson to carry over when it is implemented (donor 4a0022d6): the D3D12 fence shared
-    // with CUDA must be waited on from the CPU thread before any staging resource is released.
-    // Releasing COM resources while the DirectStorage queue still has requests in flight
-    // crashes inside the NVIDIA D3D12 driver. Tear the CUDA side down with
-    // cudaDestroyExternalMemory and never cudaFree a mapped external pointer.
-    //
-    // Returns false to fall back to the portable path for this record.
-    [[nodiscard]] virtual bool
-    try_direct_storage_restore(const DiskRecordDescriptor& record,
-                               const std::filesystem::path& extent_file,
-                               std::span<const DiskExtentLocation> extents) = 0;
-#endif
-};
 
 struct DiskSpillRequest {
     DiskRecordKey key;
