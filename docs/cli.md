@@ -275,12 +275,12 @@ only has to prefill the uncovered suffix. A restore is then bounded by storage b
 than by compute; on the donor fork's NVMe a 152k-token checkpoint came back in 367 ms against 162 s
 of cold prefill, and the equivalent figure for this implementation has not been measured yet.
 
-**The write half is what ships today.** Records are captured, published, replayed at startup,
-evicted and compacted, but reading one back into a live continuation still needs a Program
-transaction that does not exist yet, so a later run does not yet skip its prefill. Until then the
-flag builds and fills the store; see
-[资源调度与上下文缓存 §5.3](maintainer/resource-scheduling-and-context-cache.md) for what the
-remaining step is.
+**Both halves are live.** A run restores the longest matching record into a free catalog slot
+before it plans, so it prefills only the uncovered suffix; `prompt_cache_restores` counts it and
+the restored prefix appears as the request's cached tokens. Adoption never evicts anything to make
+room, so a restore is declined - and the run prefills - when the checkpoint's device KV pages do
+not fit or the model has a speculative backend (`--speculative`). See
+[资源调度与上下文缓存 §5.3](maintainer/resource-scheduling-and-context-cache.md).
 
 Records carry the artifact and KV-layout signature, so changing the model, `--kv-dtype` or the
 context geometry never matches a stored record. `--prompt-cache-dir` and `--prompt-cache-max-bytes`

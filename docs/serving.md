@@ -1081,10 +1081,14 @@ is bounded by storage bandwidth rather than by compute: on the donor fork's NVMe
 checkpoint came back in 367 ms against 162 s of cold prefill. The equivalent figure for this
 implementation's portable path has not been measured yet.
 
-**The write half is what ships today.** Records are captured, published, replayed at startup,
-evicted and compacted, and the `prompt_cache` metrics report all of it; reading one back into a
-live continuation still needs a Program transaction that does not exist yet, so the restore
-counters stay at zero and a matching request still prefills. See
+**Both halves are live.** Records are captured, published, replayed at startup, evicted and
+compacted, and a request whose prefix matches a stored record restores it into a free catalog slot
+before candidate enumeration, so the planner prices it like any other resident checkpoint and only
+the uncovered suffix is prefilled. `prompt_cache_restores`, `prompt_cache_restore_failures` and
+`prompt_cache_restored_bytes` report that side, and the restored prefix shows up in the usual
+`cached_tokens` of the request's usage. Adoption never evicts a resident owner to make room: when
+the checkpoint's device KV pages do not fit, or the model has a speculative backend
+(`--speculative`), the restore is declined and the request prefills. See
 [资源调度与上下文缓存 §5.3](maintainer/resource-scheduling-and-context-cache.md).
 
 Records are keyed by the same content identity as in-memory prefix reuse and carry the artifact and

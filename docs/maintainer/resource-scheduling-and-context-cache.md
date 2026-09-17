@@ -462,8 +462,9 @@ decode round 不被阻塞。
 任何 resident 候选时才探测；命中则 restore 并装入一个 **空闲** catalog slot，随后按普通 resident source
 参与 §7 的 target 搜索与定价，只有未覆盖的后缀进入 prefill。不会为此驱逐 resident owner：那等于用未经
 验证的 disk source 换掉已证明可用的内存 source。把恢复出的字节变成 continuation 是 Program 的职责，
-ResourceManager 通过 Engine 提供的 adoption 回调完成这一步；回调未设置时整个 hook 直接返回 false，
-一次文件读都不会发生（见下面的“当前状态”）。
+ResourceManager 通过 Engine 提供的 adoption 回调（`Program::adopt_prompt_cache_record`）完成这一步；
+回调未设置时整个 hook 直接返回 false，一次文件读都不会发生。adoption 拒绝是一个正常结果，此时
+`prompt_cache_restore_failures` 递增，该请求照常 prefill。
 
 **Hook (c) — startup。** store 打开时重放 journal，重建 record 与 extent 索引。没有启动期扫描或压缩，
 因此启动代价与 record 数量成正比而与 pool 体积无关。
@@ -504,17 +505,72 @@ Engine 在装载时已经算出的 `LoadSummary::prefill_signature` 作为 artif
 字符串并互相匹配对方的 record。整串只使用目录名可以原样保留的字符，所以 store 目录名不会把两个不同
 的 signature 折叠成同一个目录。
 
-**当前状态。** store、journal、LRU、压缩、取消、options 解析、signature 组成、stats，以及
-transfer port 的 capture 与 restore 两侧都已经就位；`--prompt-cache` 会真的把 record 写到磁盘并在
-下次进程启动时重放出来。**尚未就位的是 adoption**：把一条恢复出来的 record 变成 catalog 里的
-continuation 还缺一个 Program 事务。`KVAddressSpaceStore` 只能在 active address space 上
-`ensure_mapped_to_tokens` 并 `commit_frontier`，没有从既有页直接装配一个 inactive address space 的
-入口，而 continuation 还需要 ledger、`ResidentPrefixIdentity`、rope delta 与 execution frontier 才能
-通过 exact verification。因此 `EngineCore` 目前把 `attach_disk_tier` 的 adoption 回调留空，
-`ResourceManager::restore_from_disk_tier` 因此直接返回 false，hook (b) 不会发起任何文件读——读回一条
-没有东西能消费的 record 只会白花 I/O。record 的 state image 已经带上一个 Program 自己定义的头部
-（几何、frontier、rope delta、checkpoint 种类），`ContextDiskStore` 对此保持 payload-agnostic；
-adoption 落地时该头部提升版本号并补上 ledger 与 prefix identity。
+**Record 载荷。** record 的 state image blob 由 Program 自己定义的定长头部
+（`PromptCacheRecordHeader`，全部字段都是 32 位，因此结构体没有填充字节，同一个 checkpoint 永远产出
+同一串字节）加上 State image，再加上 exact verification 需要的三段身份数据构成，顺序是：ledger token
+id、编码后的 `ResidentPrefixIdentity`、编码后的 `PrefixShortlistDigests`。`ContextDiskStore` 对整段
+blob 保持 payload-agnostic。头部除几何、frontier、rope delta、checkpoint 种类与 execution frontier
+之外还带上三段身份数据的字节数，以及该 frontier 的 vision item/patch 数——rebuild work 的 token 项在
+本地用当前 `prefill_chunk` 重算，因为 `prefill_chunk` 不进 store signature。
+
+身份编码属于 `prefix_identity.*` 自己（`encode`/`decode`），因为只有这两个类知道 exact verification
+会读哪些字段；`decode` 拒绝截断、长度字段超出载荷、rewrite frontier 非严格递增或 Vision span 不是
+prefix 有序的载荷，并在失败时把对象清空。digest 序列是**存**下来而不是重算的，这样恢复出的 record 可以
+与它被检索到的那个 key 对账，而不是相信第二次推导。
+
+头部版本因此从 1 提升到 2。旧版本 record 在 `commit_state_image` 里被拒绝（`version` 不等于当前值），
+落到 `ContextDiskTier::restore` 的失败分支：`begin_restore` 已经返回过几何，于是 `end_restore(false)`
+把 Host slot 与 arena allocation 退回，`restore_failures` 递增，请求照常 prefill。store 自己的
+signature/version 校验在这之前——signature 不同的整个 store 被丢弃，version 校验只负责同一 signature
+下的 record 布局变化。
+
+**Adoption 事务。** `Program::adopt_prompt_cache_record()` 在 Engine worker 上把 port 刚恢复出来的
+record 变成一个 catalogued continuation。它不引入任何新的物理 authority——每一步都是已有入口，因此要
+遵守的不变量就是那些入口本来就在强制的：
+
+1. `KVAddressSpaceStore::create_active(main_pages, row)` 建一个新的 address space。row 是空闲的
+   execution row（`execution_row_free`）：row 与 lane 一对一，而 adoption 没有自己的 lane，所以它只
+   借用一个未被绑定的 row，并在 commit 之后立刻 `deactivate` 归还。
+2. `ensure_mapped_to_tokens(frontier)` 从 activation 自带的 `DeviceKVPageReservation` 物化 device
+   页——这就是 `Used_r(S)` 记账的地方，`physical_occupancy()` 直接读 pool，没有第二份台账。
+3. `DeviceKVPagePool::copy_from_host(arena_view, pages, device.stream)` 把恢复出的 `HostKVArena`
+   allocation 灌进这些页，随后同步 stream：frontier 一旦 commit，这些页就是别的请求可以读的 checkpoint。
+4. `commit_frontier(frontier)` 写 committed columns 与 content epoch，`set_checkpoint_requirement`
+   建立保护，然后 `deactivate`。
+5. `HostKVExtentStore::prepare_adopted` + `publish` 把**恢复时用的那块 arena allocation 本身**登记成
+   这个 checkpoint 的 Host extent，一页都不再复制；必须在 deactivate 之后做，因为带 writer reference
+   的页不是可 pin 的 source。结果是一个 `Both`-resident 的 KV，落地即可再次 spill。
+6. `StateImageStore::adopt_host_checkpoint` 把恢复时预留的 Host State slot 登记成一个 Host-only 的
+   `CheckpointImmutable` 对象——这正是 pressure 把 endpoint 降级之后留下的形状，所以它的 H2D 恢复代价
+   已经被现成地定价了。
+7. 填好 `SequenceState` 的 ledger、`ResidentPrefixIdentity`、digest、rope delta、execution frontier
+   与 rebuild work，slot 置为 `Catalogued`，`populate_continuation_summary` 产出 summary。
+   `tail_hidden_valid` 为 false：record 不带 hidden tail，而只有 MTP bridge 会读它。
+
+任意一步失败都走 `release_continuation_slot_best_effort` 回滚，已交给 store 的东西随 slot 一起释放，
+没交出去的 arena allocation 与 State slot 退回各自的池子；一次失败的 adoption 除了已经花掉的那次
+文件读之外不留任何代价。
+
+**拒绝规则。** adoption 永不为了成功而驱逐任何东西，所以下面每一条都是「拒绝并让请求 prefill」：
+
+| 条件 | 原因 |
+|---|---|
+| device KV 页放不进 `physical_peak_fits` | 挤掉一个 resident owner 等于用未验证的 disk source 换掉已证明可用的内存 source |
+| 没有空闲 catalog slot 或没有未绑定的 execution row | 同上，二者都不从 resident owner 手里抢 |
+| record 或 Program 带 speculative backend KV pool | 第二个 KV pool 的装配没有实现；而且 MTP 下一个被复用的 checkpoint 只有在 draft KV 也回来时才是 materializable 的（见 §4.6 的 `mtp_kv_valid` 检查） |
+| checkpoint 种类不是 `SessionEndpoint` | endpoint 的 frontier 就是 owner 的 execution frontier，这才让 record 里的 rope delta 与 execution frontier 描述的是同一个位置；rewrite checkpoint、long anchor 与 shared prefix 落在 execution frontier 之前，需要各自的 continuation 形状 |
+| 三段身份数据缺任何一段 | 只能 shortlist 而无法 exact verify 的 continuation 是 disk 命中唯一可能返回别人 token 的路径 |
+| 有未结的 context transaction | 逻辑状态在事务中不可变更 |
+
+**当前状态。** 两半都已经就位：store、journal、LRU、压缩、取消、options 解析、signature 组成、stats、
+transfer port 的 capture/restore，以及上面的 adoption 事务。`--prompt-cache` 会把 record 写到磁盘、在
+下次进程启动时重放出来，并在下一个同前缀请求上把它 adopt 成 catalog 里的 continuation，只有未覆盖的
+后缀进入 prefill。`prompt_cache_restores` / `prompt_cache_restore_failures` /
+`prompt_cache_restored_bytes` 报告这一侧；恢复出的前缀按普通 reuse 出现在请求 usage 的 `cached_tokens`
+里。donor fork 在 NVMe 上量到的是 152k token record 367 ms 对 162 s 冷 prefill；本仓库的 portable 路径
+还没有在 GPU 上复现这个数字。剩下的缺口是上表里的两条形状限制：带 speculative backend 的 record，以及
+`SessionEndpoint` 之外的 checkpoint 种类。两者都需要把 backend pool 的 host extent 用 backend layout
+单独装配出来，或给 rewrite/anchor/shared 各自的 slot 形状，不是 adoption 事务本身的问题。
 
 **Transfer port 的线程契约。** 接口在 `runtime/contract/context_disk.h`，实现在
 `models/qwen3_5/program/prompt_cache_port.*`——模型层不 include Engine 头文件，Engine 也不知道一页
