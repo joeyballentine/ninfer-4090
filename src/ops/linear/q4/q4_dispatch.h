@@ -1,9 +1,12 @@
 #pragma once
 
+#include "core/arena.h"
 #include "core/weight.h"
 #include "ninfer/ops/linear.h"
+#include "ops/linear/a8_prefill/a8_prefill_plan.h"
 #include "ops/linear/q4/q4_launch.h"
 
+#include <cstddef>
 #include <cstdint>
 
 namespace ninfer::ops::detail {
@@ -11,7 +14,16 @@ namespace ninfer::ops::detail {
 Q4Launch select_q4_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t);
 Q4Launch select_q4_launch(std::int32_t n, std::int32_t k, std::int32_t t, LinearPolicy policy);
 
+// Null when the sm_89 FP8 prefill family does not claim this problem at this extent.
+A8PrefillLaunch select_q4_a8_prefill_launch(std::int32_t n, std::int32_t k, std::int32_t t,
+                                            LinearPolicy policy);
+
+[[nodiscard]] std::size_t q4_linear_workspace_capacity_bytes(std::int32_t n, std::int32_t k,
+                                                             LinearPolicy policy,
+                                                             std::int32_t min_tokens,
+                                                             std::int32_t max_tokens);
+
 void q4_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
-                 cudaStream_t stream);
+                 WorkspaceArena* workspace, cudaStream_t stream);
 
 } // namespace ninfer::ops::detail

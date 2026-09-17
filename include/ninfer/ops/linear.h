@@ -38,6 +38,26 @@ enum class LinearPolicy : std::uint8_t {
 }
 
 /**
+ * @brief Enables or disables the Ada (sm_89) FP8 prefill routes of the groupwise row-split
+ * formats.
+ *
+ * @details These routes quantize the activation to E4M3 with one FP32 scale per token and contract
+ * on Ada's FP8 tensor cores; the weight side stays exact. They are private implementations of the
+ * unchanged Linear contract and are admitted only under an A8-permitting policy, on an sm_89
+ * build, at a large token extent, and when this gate is on. The gate defaults to off and exists so
+ * the activation profile can be measured before it becomes the default; see
+ * `docs/maintainer/ada-fp8-prefill.md`.
+ *
+ * The gate participates in route selection, so it also changes what
+ * linear_workspace_capacity_bytes() reserves. Set it once, before the first capacity query, and do
+ * not flip it while any planned capacity is still in use.
+ */
+void set_prefill_a8_routes_enabled(bool enabled) noexcept;
+
+/// Current state of the Ada FP8 prefill route gate.
+[[nodiscard]] bool prefill_a8_routes_enabled() noexcept;
+
+/**
  * Returns the caller-owned transient capacity required by Linear for every T in the inclusive
  * `[min_tokens,max_tokens]` interval. Invalid registered profiles, policies, or intervals throw;
  * a legal route that requires no transient storage returns zero.

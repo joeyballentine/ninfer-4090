@@ -1,4 +1,5 @@
 #include "ops/linear/q4/q4_shapes.h"
+#include "ops/linear/q4/q4_a8_prefill_launch.h"
 #include "ops/linear/q4/q4_gemv_launch.cuh"
 #include "ops/linear/q4/q4_ksplit_launch.cuh"
 #include "ops/linear/q4/q4_mma_launch.cuh"
@@ -28,6 +29,19 @@ Q4Launch select_q4_n5120_k6144(std::int32_t tokens) {
     if (tokens <= 96) return launch_q4_mma<MmaR32C32>;
     if (tokens <= 192) return launch_q4_mma<MmaR32C64>;
     return launch_q4_mma_r64_c128;
+}
+
+
+// The FP8 prefill route claims the whole admitted interval at this shape: one 64-row x 128-token
+// tile, which is the tile the BF16 prefill route already settles on here. Below the family
+// threshold selection falls back to the A16 routes above.
+A8PrefillLaunch select_q4_a8_prefill_n5120_k6144(std::int32_t tokens) {
+#if defined(NINFER_SM89)
+    if (tokens >= kA8PrefillMinTokens) { return launch_q4_a8_prefill_r64_c128; }
+#else
+    (void)tokens;
+#endif
+    return nullptr;
 }
 
 } // namespace ninfer::ops::detail

@@ -9,6 +9,7 @@
 #include "ops/linear/q6/q6_dispatch.h"
 #include "ops/linear/q8/q8_dispatch.h"
 
+#include <atomic>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -16,6 +17,9 @@
 
 namespace ninfer::ops {
 namespace {
+
+// Route-selection input, not a semantic parameter: it only narrows the private implementation set.
+std::atomic<bool> g_prefill_a8_routes{false};
 
 std::int64_t checked_numel(const Tensor& tensor, const char* label) {
     std::int64_t total = 1;
@@ -78,10 +82,10 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
                      WorkspaceArena* workspace, cudaStream_t stream) {
     switch (w.qtype) {
     case QType::Q4_G64_FP16:
-        detail::q4_dispatch(x, w, out, policy, stream);
+        detail::q4_dispatch(x, w, out, policy, workspace, stream);
         return;
     case QType::Q5_G64_FP16:
-        detail::q5_dispatch(x, w, out, policy, stream);
+        detail::q5_dispatch(x, w, out, policy, workspace, stream);
         return;
     case QType::Q6_G64_FP16:
         detail::q6_dispatch(x, w, out, policy, stream);
@@ -107,6 +111,14 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
 
 } // namespace
 
+void set_prefill_a8_routes_enabled(bool enabled) noexcept {
+    g_prefill_a8_routes.store(enabled, std::memory_order_relaxed);
+}
+
+bool prefill_a8_routes_enabled() noexcept {
+    return g_prefill_a8_routes.load(std::memory_order_relaxed);
+}
+
 std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_rows,
                                             std::int32_t input_rows, LinearPolicy policy,
                                             std::int32_t min_tokens, std::int32_t max_tokens) {
@@ -117,13 +129,11 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
 
     switch (qtype) {
     case QType::Q4_G64_FP16:
-        (void)detail::select_q4_launch(output_rows, input_rows, min_tokens, policy);
-        (void)detail::select_q4_launch(output_rows, input_rows, max_tokens, policy);
-        return 0;
+        return detail::q4_linear_workspace_capacity_bytes(output_rows, input_rows, policy,
+                                                          min_tokens, max_tokens);
     case QType::Q5_G64_FP16:
-        (void)detail::select_q5_launch(output_rows, input_rows, min_tokens, policy);
-        (void)detail::select_q5_launch(output_rows, input_rows, max_tokens, policy);
-        return 0;
+        return detail::q5_linear_workspace_capacity_bytes(output_rows, input_rows, policy,
+                                                          min_tokens, max_tokens);
     case QType::Q6_G64_FP16:
         (void)detail::select_q6_launch(output_rows, input_rows, min_tokens, policy);
         (void)detail::select_q6_launch(output_rows, input_rows, max_tokens, policy);
