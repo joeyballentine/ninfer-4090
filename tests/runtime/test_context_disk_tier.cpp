@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -87,8 +88,15 @@ public:
     std::uint64_t captures_ended_published   = 0;
     std::uint64_t captures_ended_unpublished = 0;
     std::vector<std::uint64_t> dropped_captures;
-    bool fail_next_restore_commit = false;
-    bool refuse_next_restore      = false;
+    bool fail_next_restore_commit           = false;
+    bool fail_next_state_image_commit       = false;
+    bool refuse_next_restore                = false;
+    std::uint64_t restores_ended_complete   = 0;
+    std::uint64_t restores_ended_incomplete = 0;
+    // What the real port keeps for the Program's adoption transaction: the destination of the
+    // last restore the tier reported complete. A restore the tier did not complete must never
+    // leave one behind, because nothing would ever consume it.
+    std::optional<std::uint64_t> adoptable_destination;
 
     [[nodiscard]] std::uint32_t batch_pages() const noexcept override { return batch_; }
 
@@ -162,6 +170,9 @@ public:
             fail_next_restore_commit = false;
             return false;
         }
+        // The real port reads the state image first and parses its header before it places a
+        // single page, so a page commit before the state image is a tier ordering bug.
+        require(state_committed_, "the tier committed pages before the state image");
         if (target_ == nullptr) { return false; }
         for (std::uint32_t page = 0; page < count; ++page) {
             target_->pages[first + page].assign(
@@ -171,18 +182,46 @@ public:
         return true;
     }
 
+    // Refusing the state image is how the real port rejects a record whose header version this
+    // build cannot place: the geometry already matched, so the tier has to unwind a started
+    // restore rather than simply miss.
     [[nodiscard]] bool commit_state_image(std::span<const std::byte> payload) override {
+        if (fail_next_state_image_commit) {
+            fail_next_state_image_commit = false;
+            return false;
+        }
         if (target_ == nullptr) { return false; }
         target_->state.assign(payload.begin(), payload.end());
+        state_committed_ = true;
         return true;
     }
 
-    void end_restore(bool) noexcept override { target_ = nullptr; }
+    void end_restore(bool complete) noexcept override {
+        if (complete) {
+            ++restores_ended_complete;
+            adoptable_destination = restore_destination;
+        } else {
+            ++restores_ended_incomplete;
+            // A partially filled destination is released, not offered for adoption.
+            restored.erase(restore_destination);
+        }
+        target_          = nullptr;
+        state_committed_ = false;
+    }
+
+    // Consumes the restore the way the adoption transaction does, so a second adoption of the
+    // same restore is visibly impossible.
+    [[nodiscard]] std::optional<std::uint64_t> take_adoptable_destination() noexcept {
+        std::optional<std::uint64_t> out;
+        out.swap(adoptable_destination);
+        return out;
+    }
 
 private:
     std::uint32_t batch_       = 1;
     FakeCheckpoint* capturing_ = nullptr;
     FakeCheckpoint* target_    = nullptr;
+    bool state_committed_      = false;
     std::vector<std::byte> staging_;
 };
 
@@ -303,6 +342,44 @@ void test_missing_slot_and_refused_restore() {
 
 // Cancellation is a latency-priority signal, not an invalidation: it drops a spill that has not
 // started and never discards one whose bytes are already written.
+// The port keeps a completed restore for the Program's adoption transaction, so the tier's
+// completion signal has to be exact: complete only when the state image and every page landed,
+// and handed over exactly once. A record this build cannot place - an older record layout
+// version, which the real port detects by refusing the state image - has to unwind a started
+// restore instead of leaving a half-filled destination behind.
+void test_completed_restore_is_handed_over_once() {
+    TempDirectory directory("adoption");
+    FakePort port(8);
+    port.slots[1] = make_checkpoint(23, 11);
+    ContextDiskTier tier(config_for(directory.path()), port);
+    tier.request_spill(DiskSpillRequest{.key = key_for(704), .owner_token = 1});
+    tier.drain();
+    const auto found = tier.lookup(std::vector<DiskRecordKey>{key_for(704)});
+    require(found.has_value(), "the record for the adoption test was not published");
+
+    // A record whose header this build cannot place: the geometry matched, the destination was
+    // reserved, and the state image is then refused.
+    port.fail_next_state_image_commit = true;
+    port.restore_destination          = 11;
+    require(!tier.restore(*found), "a refused state image reported a successful restore");
+    require(tier.stats().restore_failures == 1, "the refused record was not counted as a failure");
+    require(port.restores_ended_incomplete == 1 && port.restores_ended_complete == 0,
+            "the tier reported a refused restore as complete");
+    require(!port.take_adoptable_destination().has_value(),
+            "a refused restore left a destination for adoption");
+    require(port.restored.find(11) == port.restored.end(),
+            "a refused restore left its partially filled destination behind");
+
+    port.restore_destination = 12;
+    require(tier.restore(*found), "the retry after a refused state image did not succeed");
+    require(port.restores_ended_complete == 1, "the completed restore was not reported complete");
+    expect_equal(port.restored[12], port.slots[1], "the adopted checkpoint differs");
+    require(port.take_adoptable_destination() == std::optional<std::uint64_t>(12),
+            "the completed restore was not offered for adoption");
+    require(!port.take_adoptable_destination().has_value(),
+            "the same completed restore was offered for adoption twice");
+}
+
 void test_request_priority_drops_only_unstarted_spills() {
     TempDirectory directory("priority");
     FakePort port(4);
@@ -406,6 +483,7 @@ int main() {
         test_spill_then_restore();
         test_restore_after_restart();
         test_missing_slot_and_refused_restore();
+        test_completed_restore_is_handed_over_once();
         test_request_priority_drops_only_unstarted_spills();
         test_queue_bounds();
         test_superseded_spill_releases_its_capture();

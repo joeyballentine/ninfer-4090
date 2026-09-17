@@ -7,6 +7,10 @@
 // configuration is never matched - by running a third Engine whose KV storage differs and
 // checking that it lands in its own store instead of adopting the first one's records.
 //
+// It also covers the read half: after the restart, a turn over the same prefix restores the record
+// into a catalog slot, reports it as reused prompt tokens, and produces the same continuation a
+// cold run does under greedy sampling.
+//
 // Skips with 77 when NINFER_TEST_ARTIFACT is unset or no CUDA device is present.
 
 #include "ninfer/engine.h"
@@ -99,6 +103,16 @@ ninfer::RequestOptions turn_options(std::uint32_t tokens) {
 
 // One Engine lifetime: run two turns of the same conversation so a terminal endpoint is
 // catalogued and then pressured onto the host, and report what the tier recorded.
+std::vector<ninfer::TokenId> second_turn_prompt(const std::vector<ninfer::TokenId>& prefix,
+                                                const std::vector<ninfer::TokenId>& generated) {
+    std::vector<ninfer::TokenId> tokens = prefix;
+    tokens.insert(tokens.end(), generated.begin(), generated.end());
+    for (std::uint32_t index = 0; index < 200; ++index) {
+        tokens.push_back(static_cast<ninfer::TokenId>(2000 + (index % 593)));
+    }
+    return tokens;
+}
+
 ninfer::RuntimeStats fill_store(const char* artifact, const std::filesystem::path& store) {
     ninfer::Engine engine(cache_options(artifact, store));
     const std::vector<ninfer::TokenId> prefix = conversation_prefix();
@@ -106,12 +120,8 @@ ninfer::RuntimeStats fill_store(const char* artifact, const std::filesystem::pat
         engine.generate(engine.prepare_tokens(prefix), turn_options(8));
     expect(first.generated_token_ids.size() == 8, "the first turn did not generate eight tokens");
 
-    std::vector<ninfer::TokenId> second_turn = prefix;
-    second_turn.insert(second_turn.end(), first.generated_token_ids.begin(),
-                       first.generated_token_ids.end());
-    for (std::uint32_t index = 0; index < 200; ++index) {
-        second_turn.push_back(static_cast<ninfer::TokenId>(2000 + (index % 593)));
-    }
+    const std::vector<ninfer::TokenId> second_turn =
+        second_turn_prompt(prefix, first.generated_token_ids);
     const ninfer::GenerationResult second =
         engine.generate(engine.prepare_tokens(second_turn), turn_options(8));
     expect(second.generated_token_ids.size() == 8, "the second turn did not generate eight tokens");
@@ -168,6 +178,56 @@ int main() {
         const ninfer::RuntimeStats separate = engine.runtime_stats();
         expect(separate.prompt_cache_records == 0,
                "a store for a different KV storage adopted foreign records");
+    }
+
+    // The read half. Turn 1 in its own Engine, then a second Engine over the same prefix: the
+    // record has to come back, be adopted as a continuation, and cover the prompt up to its own
+    // frontier, so only the uncovered suffix is prefilled.
+    {
+        const std::filesystem::path restore_store = root.path() / "restore-store";
+        const std::vector<ninfer::TokenId> prefix = conversation_prefix();
+        std::vector<ninfer::TokenId> first_generated;
+        {
+            ninfer::Engine engine(cache_options(artifact, restore_store));
+            const ninfer::GenerationResult first =
+                engine.generate(engine.prepare_tokens(prefix), turn_options(8));
+            first_generated = first.generated_token_ids;
+            expect(first_generated.size() == 8, "the seeding turn did not generate eight tokens");
+            expect(engine.runtime_stats().prompt_cache_spills != 0,
+                   "the seeding turn published no record");
+        }
+        const std::vector<ninfer::TokenId> second = second_turn_prompt(prefix, first_generated);
+
+        // A cold run of the same second turn with no store at all is the reference: greedy
+        // sampling over the same tokens has to produce the same continuation whether the prefix
+        // was prefilled or restored.
+        std::vector<ninfer::TokenId> cold_continuation;
+        {
+            ninfer::EngineOptions options = cache_options(artifact, {});
+            options.prompt_cache          = ninfer::PromptCacheOptions{};
+            ninfer::Engine engine(std::move(options));
+            cold_continuation = engine.generate(engine.prepare_tokens(second), turn_options(16))
+                                    .generated_token_ids;
+            expect(cold_continuation.size() == 16, "the cold reference run did not generate");
+        }
+
+        ninfer::Engine engine(cache_options(artifact, restore_store));
+        const ninfer::GenerationResult restored =
+            engine.generate(engine.prepare_tokens(second), turn_options(16));
+        const ninfer::RuntimeStats stats = engine.runtime_stats();
+        expect(stats.prompt_cache_restores == 1,
+               "a matching prefix after a restart did not restore exactly one record");
+        expect(stats.prompt_cache_restore_failures == 0,
+               "the restore that was counted also reported a failure");
+        expect(stats.prompt_cache_restored_bytes != 0, "the restore moved no bytes");
+        // The adopted checkpoint's frontier is the seeding turn's execution frontier: the whole
+        // prefix plus the eight tokens it generated.
+        expect(restored.reused_prompt_tokens == prefix.size() + first_generated.size(),
+               "the reused prefix does not equal the restored record's frontier");
+        expect(restored.prefix_reuse_path == ninfer::PrefixReusePath::PrivateEndpoint,
+               "the restored record was not reused as a private endpoint");
+        expect(restored.generated_token_ids == cold_continuation,
+               "the continuation after a restore differs from a cold run's");
     }
 
     // With the option off nothing is constructed, so no counter can move.

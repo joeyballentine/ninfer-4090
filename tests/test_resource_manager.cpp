@@ -5,7 +5,11 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
+#include <filesystem>
 #include <iostream>
+#include <map>
+#include <string>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -1854,6 +1858,250 @@ ActiveRequest start_active(FakeManager& manager, FakeProgram& program, std::uint
     return ActiveRequest{.lane = lane, .sequence = sequence};
 }
 
+// --- Persistent disk tier -----------------------------------------------------------------
+//
+// Hook (b) end to end with a host-only tier: a real `ContextDiskTier` over a real store, a fake
+// `ContextDiskTransferPort` holding page images in ordinary host memory, and an `adopt` callback
+// standing in for the Program transaction. What is under test here is the Engine half - the probe
+// rule, the free-slot rule, and what happens to the catalog and the counters when adoption
+// succeeds or declines.
+
+using ninfer::runtime::ContextDiskStoreConfig;
+using ninfer::runtime::ContextDiskTier;
+using ninfer::runtime::ContextDiskTransferPort;
+using ninfer::runtime::DiskCheckpointGeometry;
+using ninfer::runtime::DiskRecordDescriptor;
+using ninfer::runtime::DiskRecordKey;
+using ninfer::runtime::DiskSpillRequest;
+
+constexpr std::uint32_t kDiskPageBytes  = 512;
+constexpr std::uint32_t kDiskStateBytes = 128;
+
+class TempStoreDirectory {
+public:
+    explicit TempStoreDirectory(const std::string& name) {
+        const auto unique = static_cast<unsigned long long>(
+            std::chrono::steady_clock::now().time_since_epoch().count());
+        path_ = std::filesystem::temp_directory_path() /
+                ("ninfer_rm_disk_" + name + "_" + std::to_string(unique));
+        std::filesystem::remove_all(path_);
+        std::filesystem::create_directories(path_);
+    }
+
+    ~TempStoreDirectory() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path_, ignored);
+    }
+
+    TempStoreDirectory(const TempStoreDirectory&)            = delete;
+    TempStoreDirectory& operator=(const TempStoreDirectory&) = delete;
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
+
+private:
+    std::filesystem::path path_;
+};
+
+class FakeDiskPort final : public ContextDiskTransferPort {
+public:
+    std::map<std::uint64_t, std::vector<std::byte>> slots;
+    std::uint64_t restores_completed = 0;
+    std::uint32_t pages              = 4;
+
+    [[nodiscard]] std::uint32_t batch_pages() const noexcept override { return 4; }
+
+    [[nodiscard]] std::optional<DiskCheckpointGeometry>
+    begin_capture(std::uint64_t owner_token) override {
+        const auto found = slots.find(owner_token);
+        if (found == slots.end()) { return std::nullopt; }
+        capturing_ = &found->second;
+        return DiskCheckpointGeometry{
+            .page_bytes = kDiskPageBytes, .page_count = pages, .state_bytes = kDiskStateBytes};
+    }
+
+    [[nodiscard]] std::span<const std::byte> capture_state_image() override {
+        if (capturing_ == nullptr) { return {}; }
+        return *capturing_;
+    }
+
+    [[nodiscard]] std::span<const std::byte> capture_pages(std::uint32_t first,
+                                                           std::uint32_t count) override {
+        if (capturing_ == nullptr || first + count > pages) { return {}; }
+        staging_.assign(static_cast<std::size_t>(count) * kDiskPageBytes, std::byte{1});
+        return staging_;
+    }
+
+    void end_capture(bool) noexcept override { capturing_ = nullptr; }
+
+    void drop_capture(std::uint64_t) noexcept override {}
+
+    [[nodiscard]] std::optional<DiskCheckpointGeometry>
+    begin_restore(const DiskRecordDescriptor& record) override {
+        return DiskCheckpointGeometry{.page_bytes  = record.page_bytes,
+                                      .page_count  = record.page_count,
+                                      .state_bytes = record.state_bytes};
+    }
+
+    [[nodiscard]] std::span<std::byte> restore_staging(std::uint32_t count) override {
+        staging_.assign(std::max<std::size_t>(static_cast<std::size_t>(count) * kDiskPageBytes,
+                                              kDiskStateBytes),
+                        std::byte{});
+        return staging_;
+    }
+
+    [[nodiscard]] bool commit_pages(std::uint32_t, std::uint32_t) override { return true; }
+
+    [[nodiscard]] bool commit_state_image(std::span<const std::byte>) override { return true; }
+
+    void end_restore(bool complete) noexcept override {
+        if (complete) { ++restores_completed; }
+    }
+
+private:
+    std::vector<std::byte>* capturing_ = nullptr;
+    std::vector<std::byte> staging_;
+};
+
+// One published record whose key is what `make_base(digest)` probes for at `frontier`. The fake
+// shortlist key carries its rolling digests as zero, so the disk key is frontier-only - which is
+// exactly why the store also carries the configuration signature.
+DiskRecordKey disk_record_key(std::uint32_t frontier) {
+    return DiskRecordKey{
+        .digest_low = 0, .digest_high = 0, .frontier = frontier, .identity_tag = 0};
+}
+
+ContextDiskStoreConfig disk_config(const std::filesystem::path& directory) {
+    ContextDiskStoreConfig config;
+    config.directory = directory;
+    config.signature = "artifact:resource-manager-test/kv:bf16";
+    config.max_bytes = 1ULL << 30;
+    return config;
+}
+
+void publish_disk_record(ContextDiskTier& tier, FakeDiskPort& port, std::uint32_t frontier) {
+    port.slots[1] = std::vector<std::byte>(kDiskStateBytes, std::byte{7});
+    tier.request_spill(DiskSpillRequest{.key = disk_record_key(frontier), .owner_token = 1});
+    tier.drain();
+    require(tier.stats().spills_published == 1, "the disk record under test was not published");
+}
+
+FakeRequestBasePlan disk_base(std::uint32_t digest, std::uint32_t frontier) {
+    FakeRequestBasePlan out = make_base(digest);
+    out.cache.opportunities.push_back(FakeContextCache::Opportunity{
+        .kind     = ninfer::PromptCacheMarkerKind::SharedStablePrefix,
+        .evidence = ninfer::SharedCandidateEvidence::ExplicitBoundary,
+        .frontier = frontier,
+    });
+    return out;
+}
+
+// A restored record becomes an ordinary resident source: it lands in a free catalog slot before
+// candidates are enumerated, so the planner selects it and only the uncovered suffix is prefilled.
+void test_disk_record_is_adopted_into_a_free_catalog_slot() {
+    TempStoreDirectory directory("adopted");
+    FakeDiskPort port;
+    ContextDiskTier tier(disk_config(directory.path()), port);
+    publish_disk_record(tier, port, 16);
+
+    FakeManager manager = make_manager(1, 2);
+    FakeProgram program;
+    std::uint64_t adoptions = 0;
+    manager.attach_disk_tier(
+        &tier,
+        FakeManager::DiskTierBinding{
+            .adopt = [&](const DiskRecordDescriptor& record)
+                -> std::optional<std::pair<FakeContinuationHandle, FakeContinuationSummary>> {
+                ++adoptions;
+                require(record.key.frontier == 16, "the wrong record reached adoption");
+                return std::make_pair(FakeContinuationHandle(4242, 7),
+                                      FakeContinuationSummary{.endpoint = endpoint(7, 16)});
+            }});
+
+    auto inspection = manager.inspect(program, FakePreparedPrompt{7}, disk_base(7, 16), 1);
+    require(adoptions == 1 && port.restores_completed == 1,
+            "the disk hit did not reach the adoption callback");
+    require(manager.catalog_state(0) == FakeManager::CatalogState::Catalogued,
+            "the adopted record was not installed in a free catalog slot");
+    require(inspection.readiness == Readiness::Ready && inspection.choice,
+            "the adopted continuation did not produce an admission choice");
+    require(inspection.choice->summary().reusable_prompt_tokens == 16,
+            "the adopted continuation was not priced as a reused prefix");
+    require(inspection.choice->summary().prefix_reuse_path == PrefixReusePath::PrivateEndpoint,
+            "the adopted continuation was not selected as a private endpoint");
+
+    RuntimeStats stats;
+    manager.populate_runtime_stats(program, stats);
+    require(stats.prompt_cache_lookups == 1 && stats.prompt_cache_hits == 1 &&
+                stats.prompt_cache_restores == 1 && stats.prompt_cache_restore_failures == 0,
+            "the restore counters do not describe one adopted record");
+
+    // A second request over the same prefix is served by the resident copy: nothing longer than
+    // what is already resident is left to probe for.
+    auto reuse = manager.inspect(program, FakePreparedPrompt{7}, disk_base(7, 16), 2);
+    require(adoptions == 1, "a resident source was re-restored from disk");
+    require(reuse.choice && reuse.choice->summary().reusable_prompt_tokens == 16,
+            "the adopted continuation was not reusable a second time");
+    manager.attach_disk_tier(nullptr, {});
+}
+
+// Adoption is allowed to refuse - under device pressure the real transaction does. The request
+// then prefills, the record stays in the store, and the I/O is counted as a failed restore.
+void test_declined_adoption_falls_back_to_prefill() {
+    TempStoreDirectory directory("declined");
+    FakeDiskPort port;
+    ContextDiskTier tier(disk_config(directory.path()), port);
+    publish_disk_record(tier, port, 16);
+
+    FakeManager manager = make_manager(1, 2);
+    FakeProgram program;
+    std::uint64_t attempts = 0;
+    manager.attach_disk_tier(
+        &tier,
+        FakeManager::DiskTierBinding{
+            .adopt = [&](const DiskRecordDescriptor&)
+                -> std::optional<std::pair<FakeContinuationHandle, FakeContinuationSummary>> {
+                ++attempts;
+                return std::nullopt;
+            }});
+
+    auto inspection = manager.inspect(program, FakePreparedPrompt{7}, disk_base(7, 16), 1);
+    require(attempts == 1, "the disk hit did not reach the adoption callback");
+    require(manager.catalog_state(0) == FakeManager::CatalogState::Vacant,
+            "a declined adoption still claimed a catalog slot");
+    require(inspection.readiness == Readiness::Ready && inspection.choice &&
+                inspection.choice->summary().reusable_prompt_tokens == 0,
+            "a declined adoption did not fall back to a root prefill");
+
+    RuntimeStats stats;
+    manager.populate_runtime_stats(program, stats);
+    require(stats.prompt_cache_restores == 0 && stats.prompt_cache_restore_failures == 1,
+            "a declined adoption was not counted as a failed restore");
+    require(tier.lookup(std::vector<DiskRecordKey>{disk_record_key(16)}).has_value(),
+            "a declined adoption retired the record");
+    manager.attach_disk_tier(nullptr, {});
+}
+
+// Without an adoption callback the hook must not spend a single file read: a record nothing can
+// consume is pure I/O.
+void test_unbound_adoption_never_reads_a_record() {
+    TempStoreDirectory directory("unbound");
+    FakeDiskPort port;
+    ContextDiskTier tier(disk_config(directory.path()), port);
+    publish_disk_record(tier, port, 16);
+
+    FakeManager manager = make_manager(1, 2);
+    FakeProgram program;
+    manager.attach_disk_tier(&tier, FakeManager::DiskTierBinding{});
+    auto inspection = manager.inspect(program, FakePreparedPrompt{7}, disk_base(7, 16), 1);
+    require(inspection.choice && inspection.choice->summary().reusable_prompt_tokens == 0,
+            "an unbound adoption callback produced a reuse");
+    RuntimeStats stats;
+    manager.populate_runtime_stats(program, stats);
+    require(stats.prompt_cache_lookups == 0 && port.restores_completed == 0,
+            "an unbound adoption callback still probed the store");
+    manager.attach_disk_tier(nullptr, {});
+}
+
 void test_private_portfolio_loss_keeps_checkpoint_identity_fixed() {
     using ninfer::runtime::ContextPortfolioCheckpointValue;
     using ninfer::runtime::ContextPortfolioOwnerPolicy;
@@ -3480,6 +3728,9 @@ int main() {
              test_feasible_identity_expands_when_pressure_can_remove_copy);
     run_test("dominating identity fast path",
              test_dominating_identity_does_not_build_pressure_graph);
+    run_test("disk record adoption", test_disk_record_is_adopted_into_a_free_catalog_slot);
+    run_test("declined adoption prefills", test_declined_adoption_falls_back_to_prefill);
+    run_test("unbound adoption reads nothing", test_unbound_adoption_never_reads_a_record);
     run_test("root lifecycle and prefix reuse", test_root_lifecycle_and_prefix_reuse);
     run_test("stale revision is retryable", test_stale_revision_is_retryable);
     run_test("materialization abort preserves source", test_materialization_abort_preserves_source);
