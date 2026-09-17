@@ -56,12 +56,16 @@ void launch_a8_prefill_grid(const Weight& w, const A8PrefillWorkspace& scratch,
 // a padded tail would read past the materialized activation. Every registered prefill K is a
 // multiple of 128 and therefore unpadded; reject anything else instead of silently misreading.
 inline void validate_a8_prefill_problem(const Weight& w, const Tensor& x, const Tensor& out,
-                                        std::int32_t block_rows) {
+                                        std::int32_t block_rows, std::int32_t stages) {
     if (w.padded_shape[1] != w.k) {
         throw std::invalid_argument("A8 prefill: padded K must equal logical K");
     }
     if ((w.k % kA8PrefillGroupK) != 0 || (w.n % block_rows) != 0) {
         throw std::invalid_argument("A8 prefill: unsupported weight geometry");
+    }
+    // The prologue fills every pipeline stage before the first wait.
+    if ((w.k / kA8PrefillGroupK) < stages) {
+        throw std::invalid_argument("A8 prefill: K is shorter than the cp.async pipeline");
     }
     if (x.ne[0] != w.k || out.ne[0] != w.n) {
         throw std::invalid_argument("A8 prefill: operand geometry mismatch");
@@ -72,7 +76,7 @@ inline void validate_a8_prefill_problem(const Weight& w, const Tensor& x, const 
 template <class Codec, class Schedule>
 void launch_a8_prefill_linear(const Tensor& x, const Weight& w, Tensor& out,
                               WorkspaceArena& workspace, cudaStream_t stream) {
-    validate_a8_prefill_problem(w, x, out, Schedule::kBlockRows);
+    validate_a8_prefill_problem(w, x, out, Schedule::kBlockRows, Schedule::kStages);
     auto scope = workspace.scope();
     const A8PrefillWorkspace scratch = allocate_fp8_a8_workspace(workspace, x.ne[1], w.k);
     launch_fp8_a8_quantize(x, w, scratch, stream);

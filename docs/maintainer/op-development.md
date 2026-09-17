@@ -523,6 +523,9 @@ interpreting throughput against a hardware peak.
 
 [Linear tuning and performance reports](linear-tuning.md) defines the Linear-specific T ranges,
 priority points, specialization tradeoffs, and final report format.
+[Ada FP8 prefill](ada-fp8-prefill.md) is the family reference for the sm_89 E4M3 prefill routes of
+the groupwise row-split formats: their exactness argument, activation error model, admission, and
+go/no-go criterion.
 
 Choose the development surface from the requested complete Op. A related simple Op can help
 isolate shared computation when that answers a live design question, but completing a separate
