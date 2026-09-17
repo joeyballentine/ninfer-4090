@@ -2,7 +2,9 @@
 
 The persistent numeric format fixes the code range, group size, and binary16
 scale.  Model-specific recipes decide which tensors use those formats; this
-module only performs the registered numeric transform.
+module only performs the registered numeric transform.  Two scale rules share
+that transform: the group absmax, and a per-group clipping search minimizing
+the group's reconstruction error over the same canonical binary16 scales.
 """
 
 from __future__ import annotations
@@ -18,6 +20,9 @@ from tools.artifact.layouts import (
 from tools.artifact.formats import QuantFormat, get_format
 
 _FP16_MIN_SUBNORMAL = 2.0**-24
+
+MSE_CANDIDATES = 21
+MSE_LOWEST_FACTOR = 0.80
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,18 +72,12 @@ def pick_device(preferred: str | torch.device = "cuda") -> torch.device:
     return device
 
 
-def quantize_matrix(
+def _grouped_values(
     weight: torch.Tensor,
     format: str | QuantFormat,
-    *,
-    device: str | torch.device | None = None,
-) -> QuantizedMatrix:
-    """Quantize logical ``[N,K]`` values, including registered K padding.
-
-    Scales are rounded to binary16 before codes are selected because those are
-    the exact scales consumed after loading.  Padding values are zero and do
-    not affect a partially populated final group.
-    """
+    device: str | torch.device | None,
+) -> tuple[QuantFormat, torch.Tensor, torch.device]:
+    """Return the format, the padded ``[N,groups,group_size]`` view and its device."""
 
     spec = get_format(format) if isinstance(format, str) else format
     if not isinstance(spec, QuantFormat):
@@ -99,13 +98,129 @@ def quantize_matrix(
         )
         physical[:, : geometry.k].copy_(logical)
         logical = physical
-
     grouped = logical.reshape(geometry.n, geometry.groups_per_row, spec.group_size)
+    return spec, grouped, target
+
+
+def group_codes(
+    grouped: torch.Tensor, reciprocal: torch.Tensor, spec: QuantFormat
+) -> torch.Tensor:
+    """Select codes from grouped values and the canonical binary32 reciprocals."""
+
+    return torch.clamp(
+        torch.round(grouped * reciprocal.unsqueeze(-1)), spec.qmin, spec.qmax
+    )
+
+
+def clipping_factors(candidates: int) -> tuple[float, ...]:
+    """Return descending clipping factors covering ``[MSE_LOWEST_FACTOR, 1]``.
+
+    The first factor is exactly one, so a group whose absmax scale already
+    minimizes the searched error keeps the ``grouped_absmax`` result.
+    """
+
+    if type(candidates) is not int or candidates < 1:
+        raise ValueError("clipping search requires a positive candidate count")
+    if candidates == 1:
+        return (1.0,)
+    step = (1.0 - MSE_LOWEST_FACTOR) / (candidates - 1)
+    return tuple(1.0 - index * step for index in range(candidates))
+
+
+def group_importance(
+    importance: torch.Tensor, spec: QuantFormat, geometry, device: torch.device
+) -> torch.Tensor:
+    """Return a ``[1,groups,group_size]`` nonnegative per-input-channel weight."""
+
+    values = importance.detach().to(device=device, dtype=torch.float32).reshape(-1)
+    if values.numel() != geometry.k:
+        raise ValueError(
+            f"importance has {values.numel()} entries, expected {geometry.k}"
+        )
+    if not bool(torch.isfinite(values).all()) or bool((values < 0).any()):
+        raise ValueError("importance must be finite and nonnegative")
+    padded = torch.zeros(geometry.k_pad, dtype=torch.float32, device=device)
+    padded[: geometry.k].copy_(values)
+    return padded.reshape(1, geometry.groups_per_row, spec.group_size)
+
+
+def quantize_matrix(
+    weight: torch.Tensor,
+    format: str | QuantFormat,
+    *,
+    device: str | torch.device | None = None,
+) -> QuantizedMatrix:
+    """Quantize logical ``[N,K]`` values, including registered K padding.
+
+    Scales are rounded to binary16 before codes are selected because those are
+    the exact scales consumed after loading.  Padding values are zero and do
+    not affect a partially populated final group.
+    """
+
+    spec, grouped, target = _grouped_values(weight, format, device)
     max_abs = grouped.abs().amax(dim=2)
     host_scales, host_reciprocal = _canonical_scale_words(max_abs, spec.qmax)
     scales = host_scales.to(target)
     reciprocal = host_reciprocal.to(target)
-    codes = torch.clamp(
-        torch.round(grouped * reciprocal.unsqueeze(-1)), spec.qmin, spec.qmax
-    ).to(torch.int8)
+    codes = group_codes(grouped, reciprocal, spec).to(torch.int8)
+    return QuantizedMatrix(codes=codes, scales=scales)
+
+
+def quantize_matrix_mse(
+    weight: torch.Tensor,
+    format: str | QuantFormat,
+    *,
+    device: str | torch.device | None = None,
+    candidates: int = MSE_CANDIDATES,
+    importance: torch.Tensor | None = None,
+) -> QuantizedMatrix:
+    """Quantize ``[N,K]`` values with a per-group clipping-scale search.
+
+    Each group evaluates ``absmax * factor / qmax`` for every clipping factor,
+    rounds it through the same canonical binary16 word as ``quantize_matrix``,
+    and keeps the factor with the smallest reconstruction error.  ``importance``
+    optionally weights that error per logical input channel.  Equal errors keep
+    the largest factor, so the search never replaces an already optimal absmax
+    scale and never selects a higher group error than ``quantize_matrix``.
+    """
+
+    spec, grouped, target = _grouped_values(weight, format, device)
+    geometry = row_split_geometry(spec, weight.shape)
+    factors = clipping_factors(candidates)
+    n, groups, _ = grouped.shape
+    channel_weight = (
+        None
+        if importance is None
+        else group_importance(importance, spec, geometry, target)
+    )
+
+    host_max = grouped.abs().amax(dim=2).detach().cpu().to(torch.float32)
+    count = len(factors)
+    scale_words = torch.empty((n, groups, count), dtype=torch.float16)
+    reciprocals = torch.empty((n, groups, count), dtype=torch.float32)
+    errors = torch.empty((n, groups, count), dtype=torch.float32, device=target)
+    for index, factor in enumerate(factors):
+        clipped = (host_max.to(torch.float64) * factor).to(torch.float32)
+        words, reciprocal = _canonical_scale_words(clipped, spec.qmax)
+        scale_words[:, :, index] = words
+        reciprocals[:, :, index] = reciprocal
+        codes = group_codes(grouped, reciprocal.to(target), spec)
+        chosen = words.to(device=target, dtype=torch.float32).unsqueeze(-1)
+        residual = grouped - codes * chosen
+        residual = residual * residual
+        if channel_weight is not None:
+            residual = residual * channel_weight
+        errors[:, :, index] = residual.sum(dim=2)
+
+    best = errors[:, :, 0].clone()
+    choice = torch.zeros((n, groups), dtype=torch.int64, device=target)
+    for index in range(1, count):
+        improved = errors[:, :, index] < best
+        best = torch.where(improved, errors[:, :, index], best)
+        choice = torch.where(improved, index, choice)
+
+    picked = choice.detach().cpu().unsqueeze(-1)
+    scales = torch.gather(scale_words, 2, picked).squeeze(-1).to(target)
+    reciprocal = torch.gather(reciprocals, 2, picked).squeeze(-1).to(target)
+    codes = group_codes(grouped, reciprocal, spec).to(torch.int8)
     return QuantizedMatrix(codes=codes, scales=scales)
