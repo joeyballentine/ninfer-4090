@@ -83,6 +83,13 @@ struct DiskRecordDescriptor {
     std::uint64_t sequence      = 0;
 };
 
+// Where one payload lives in the extent file. The portable path never needs this - it reads
+// through the store - but a kernel-bypass DMA engine is handed file offsets directly.
+struct DiskExtentLocation {
+    std::uint64_t offset = 0;
+    std::uint64_t bytes  = 0;
+};
+
 struct ContextDiskStoreStats {
     std::uint64_t records           = 0;
     std::uint64_t blobs             = 0;
@@ -181,6 +188,11 @@ public:
     // the incoming prompt at each reusable frontier.
     [[nodiscard]] std::optional<DiskRecordDescriptor>
     lookup_longest(std::span<const DiskRecordKey> candidates);
+
+    [[nodiscard]] const std::filesystem::path& extent_file() const noexcept { return blobs_path_; }
+    // State image first when the record has one, then the pages in order.
+    [[nodiscard]] std::vector<DiskExtentLocation>
+    extent_locations(const DiskRecordDescriptor& record) const;
 
     void read_state_image(const DiskRecordDescriptor& record, std::span<std::byte> destination);
     void read_page(const DiskRecordDescriptor& record, std::uint32_t page_index,

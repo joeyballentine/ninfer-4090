@@ -18,6 +18,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -67,6 +68,26 @@ public:
     [[nodiscard]] virtual bool commit_pages(std::uint32_t first_page, std::uint32_t count) = 0;
     [[nodiscard]] virtual bool commit_state_image(std::span<const std::byte> payload) = 0;
     virtual void end_restore(bool complete) noexcept = 0;
+
+#if defined(_WIN32) && defined(NINFER_DIRECTSTORAGE)
+    // Optional kernel-bypass restore. DirectStorage reads the extent file straight into device
+    // memory, skipping the pinned staging round trip the portable path takes; on the donor fork
+    // that turned a 2.2 GB, 152k-token restore into 367 ms. It is declared here and nowhere
+    // implemented: it needs a Windows SDK, a D3D12 device and a real GPU, none of which this
+    // tree can build or test against. The portable path above is complete without it.
+    //
+    // The lesson to carry over when it is implemented (donor 4a0022d6): the D3D12 fence shared
+    // with CUDA must be waited on from the CPU thread before any staging resource is released.
+    // Releasing COM resources while the DirectStorage queue still has requests in flight
+    // crashes inside the NVIDIA D3D12 driver. Tear the CUDA side down with
+    // cudaDestroyExternalMemory and never cudaFree a mapped external pointer.
+    //
+    // Returns false to fall back to the portable path for this record.
+    [[nodiscard]] virtual bool
+    try_direct_storage_restore(const DiskRecordDescriptor& record,
+                               const std::filesystem::path& extent_file,
+                               std::span<const DiskExtentLocation> extents) = 0;
+#endif
 };
 
 struct DiskSpillRequest {

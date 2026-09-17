@@ -550,6 +550,28 @@ void ContextDiskStore::read_extent(const DiskBlobHash& hash, std::span<std::byte
     stats_.bytes_read += extent.bytes;
 }
 
+std::vector<DiskExtentLocation>
+ContextDiskStore::extent_locations(const DiskRecordDescriptor& record) const {
+    const std::lock_guard<std::mutex> guard(mutex_);
+    const auto found = records_.find(record.key);
+    if (found == records_.end()) {
+        throw std::runtime_error("context disk record is not published");
+    }
+    std::vector<DiskExtentLocation> locations;
+    locations.reserve(found->second.page_hashes.size() + 1U);
+    const auto append = [&](const DiskBlobHash& hash) {
+        const auto extent = blob_index_.find(hash);
+        if (extent == blob_index_.end()) {
+            throw std::runtime_error("context disk store extent is missing");
+        }
+        locations.push_back(
+            DiskExtentLocation{.offset = extent->second.offset, .bytes = extent->second.bytes});
+    };
+    if (found->second.has_state) { append(found->second.state_hash); }
+    for (const DiskBlobHash& hash : found->second.page_hashes) { append(hash); }
+    return locations;
+}
+
 void ContextDiskStore::read_state_image(const DiskRecordDescriptor& record,
                                         std::span<std::byte> destination) {
     DiskBlobHash hash;

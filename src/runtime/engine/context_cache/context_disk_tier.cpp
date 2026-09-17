@@ -217,6 +217,19 @@ bool ContextDiskTier::restore(const DiskRecordDescriptor& record) {
 
     bool complete       = true;
     std::uint64_t bytes = 0;
+#if defined(_WIN32) && defined(NINFER_DIRECTSTORAGE)
+    {
+        const std::lock_guard<std::mutex> io(io_mutex_);
+        if (port_.try_direct_storage_restore(record, store_.extent_file(),
+                                             store_.extent_locations(record))) {
+            port_.end_restore(true);
+            const std::lock_guard<std::mutex> guard(mutex_);
+            ++stats_.restores;
+            stats_.restored_bytes += record.payload_bytes;
+            return true;
+        }
+    }
+#endif
     try {
         const std::lock_guard<std::mutex> io(io_mutex_);
         if (record.state_bytes != 0) {

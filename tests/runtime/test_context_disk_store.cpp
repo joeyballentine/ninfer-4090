@@ -305,6 +305,31 @@ void test_compacted_store_reloads() {
     }
 }
 
+// The extent locations a kernel-bypass DMA engine would be handed must describe the same bytes
+// the portable read path returns.
+void test_extent_locations_match_the_payload() {
+    TempDirectory directory("extents");
+    ContextDiskStore store(config_for(directory.path(), 1ULL << 30));
+    publish(store, key_for(192), 3, 71);
+    const auto found = store.lookup(key_for(192));
+    require(found.has_value(), "the record was not published");
+    const auto extents = store.extent_locations(*found);
+    require(extents.size() == 4, "the extent list does not cover the state image and every page");
+    require(extents.front().bytes == 777, "the first extent is not the state image");
+
+    ninfer::core::PositionalFile file(store.extent_file(), ninfer::core::FileMode::OpenExisting,
+                                      ninfer::core::FileAccess::Read);
+    std::vector<std::byte> direct(kPageBytes);
+    std::vector<std::byte> through(kPageBytes);
+    for (std::uint32_t page = 0; page < 3; ++page) {
+        const auto& extent = extents[page + 1U];
+        require(extent.bytes == kPageBytes, "a page extent has the wrong length");
+        file.read_exact(extent.offset, std::span<std::byte>(direct).first(kPageBytes));
+        store.read_page(*found, page, through);
+        require(direct == through, "the extent location does not name the page's bytes");
+    }
+}
+
 void test_longest_prefix_selection() {
     TempDirectory directory("longest");
     ContextDiskStore store(config_for(directory.path(), 1ULL << 30));
@@ -332,6 +357,7 @@ int main() {
         test_capacity_eviction_is_least_recently_used();
         test_mark_and_sweep_compaction();
         test_compacted_store_reloads();
+        test_extent_locations_match_the_payload();
         test_longest_prefix_selection();
         std::cout << "ok\n";
     } catch (const std::exception& error) {
