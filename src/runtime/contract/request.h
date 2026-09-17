@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace ninfer::runtime {
 
@@ -14,12 +15,18 @@ struct ResolvedExecutionOptions {
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
     ThinkingControlOptions thinking;
+    // Structured output only: the grammar's initial token bitmask, one bit per vocabulary id in
+    // ascending 32-bit words. Empty leaves the request unconstrained. Program installs it with the
+    // rest of the sampling configuration, so the first sampled token is already constrained; every
+    // later round is refreshed through Program::set_token_mask.
+    std::vector<std::uint32_t> token_mask;
 };
 
 struct ResolvedRequestOptions {
     ResolvedExecutionOptions execution;
     StopPolicy stop;
     OutputOptions output;
+    StructuredOutputOptions structured_output;
 };
 
 enum class ContinuationAction : std::uint8_t {

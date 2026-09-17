@@ -5,6 +5,7 @@
 
 #include "models/qwen3_5/frontend/chat_template.h"
 #include "models/qwen3_5/frontend/encoded_history_cache.h"
+#include "models/qwen3_5/frontend/grammar.h"
 #include "models/qwen3_5/frontend/media_cache.h"
 #include "models/qwen3_5/frontend/processor.h"
 #include "models/qwen3_5/frontend/test_access.h"
@@ -23,6 +24,7 @@
 #include <limits>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -639,6 +641,20 @@ public:
     std::shared_ptr<const std::vector<TokenId>> thinking_control_tokens;
     bool vision_enabled       = true;
     std::uint32_t max_context = 0;
+
+    // Indexing the vocabulary for the grammar compiler costs real time and memory, and most
+    // deployments never ask for structured output. Build it once, on the first request that does.
+    [[nodiscard]] const fi::GrammarCompiler& grammar_compiler() const {
+        std::call_once(grammar_once, [this] {
+            grammar = std::make_unique<fi::GrammarCompiler>(tokenizer->decoded_vocabulary(),
+                                                            defaults.token_ids);
+        });
+        if (!grammar) { throw std::invalid_argument("structured output is unavailable"); }
+        return *grammar;
+    }
+
+    mutable std::once_flag grammar_once;
+    mutable std::unique_ptr<fi::GrammarCompiler> grammar;
 };
 
 std::span<const std::int32_t> PreparedPromptData::position_axis(int axis) const {
@@ -931,13 +947,22 @@ std::vector<TokenId> Frontend::tokenize_text(std::string_view text) const {
 OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
                                             const StopPolicy& caller_stop,
                                             const OutputOptions& output,
-                                            const ThinkingControlOptions& thinking) const {
+                                            const ThinkingControlOptions& thinking,
+                                            const StructuredOutputOptions& structured) const {
     if (prompt.data_ == nullptr) { throw std::invalid_argument("prepared prompt is empty"); }
     StopPolicy policy = merge_stop_policy(*impl_->tokenizer, caller_stop);
     if (output.raw) { policy.publish_stop_token = true; }
+    std::optional<fi::TokenGrammar> grammar;
+    if (structured.enabled()) {
+        if (output.raw) {
+            throw std::invalid_argument("raw output cannot carry a structured output language");
+        }
+        grammar.emplace(impl_->grammar_compiler().compile(structured, policy.token_ids));
+    }
     return OutputSession(impl_->tokenizer, std::move(policy), output,
                          prompt.data_->starts_in_reasoning, thinking,
-                         impl_->thinking_control_tokens, prompt.data_->tool_call_output);
+                         impl_->thinking_control_tokens, prompt.data_->tool_call_output,
+                         std::move(grammar));
 }
 
 const StopPolicy& Frontend::default_stop_policy() const noexcept { return impl_->defaults; }

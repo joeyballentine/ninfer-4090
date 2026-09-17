@@ -187,6 +187,9 @@ struct RequestBasePlanImpl {
     std::vector<CaptureGroup> capture_groups;
     std::vector<CaptureGroup> shared_candidates;
     qwen3_5::detail::PrefixShortlistDigests prefix_digests;
+    // Structured output only: the grammar's initial token bitmask, installed with the sampling
+    // configuration so the first sampled token is already constrained.
+    std::vector<std::uint32_t> token_mask;
     std::uint32_t prefix_identity_tag = 0;
     bool allow_prefix_reuse           = false;
 };
@@ -244,6 +247,7 @@ struct AdmissionCandidateImpl : ResourceCandidateState {
     std::vector<CaptureGroup> capture_groups;
     std::vector<CaptureGroup> shared_candidates;
     ops::SamplingConfig sampling;
+    std::vector<std::uint32_t> token_mask;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     runtime::LaneId destination{};
@@ -525,6 +529,7 @@ public:
         const SharedPrefixHandle* replacement,
         std::optional<runtime::CheckpointRef> private_replacement, bool permit_shared_publication,
         CapturePressureCandidate&& pressure, runtime::CancellationFlagView cancellation);
+    void set_token_mask(SequenceHandle sequence, std::span<const std::uint32_t> mask);
     [[nodiscard]] PendingBatch decode(std::span<const SequenceHandle> sequences,
                                       std::span<const runtime::RoundBudget> budgets,
                                       runtime::ExecutionTiming* failed_timing);
@@ -601,6 +606,8 @@ public:
     std::optional<Tensor> score_hidden;
     Tensor sampling_config;
     Tensor token_counts;
+    // Structured output: one grammar bitmask per lane, [ceil(vocab/32), max_concurrency].
+    Tensor token_masks;
 
     std::vector<SequenceState> continuation_states;
     std::vector<ContinuationSlot> continuation_slots;
@@ -1132,7 +1139,10 @@ private:
     void release_sequence_state(SequenceState& sequence) noexcept;
     void prepare_graphs();
     void install_sampling(SequenceState& sequence, RequestControl& request,
-                          const ops::SamplingConfig& config);
+                          const ops::SamplingConfig& config,
+                          std::span<const std::uint32_t> token_mask);
+    void set_token_mask_lane(std::uint32_t lane, std::span<const std::uint32_t> mask);
+    [[nodiscard]] Tensor token_mask_lane(std::uint32_t lane);
     void set_device_i32(Tensor& tensor, std::int32_t value);
     void copy_tail(SequenceState& sequence, const Tensor& source);
     void copy_round_token();

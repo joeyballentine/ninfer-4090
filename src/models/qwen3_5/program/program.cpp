@@ -424,6 +424,10 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
     return impl_->decode(sequences, budgets, failed_timing);
 }
 
+void Program::set_token_mask(SequenceHandle sequence, std::span<const std::uint32_t> mask) {
+    impl_->set_token_mask(sequence, mask);
+}
+
 runtime::ExecutionTiming
 Program::append_forced_tokens(std::span<const SequenceHandle> sequences,
                               std::span<const TokenId> row_major_tokens, std::uint32_t row_stride,

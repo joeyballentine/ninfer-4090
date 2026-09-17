@@ -103,3 +103,12 @@ ninfer_add_test(ninfer_qwen3_5_visual_scatter_test
 set_tests_properties(
   ninfer_qwen3_5_visual_scatter_test
   PROPERTIES SKIP_RETURN_CODE 77)
+
+# The structured-output grammar is host-only: it compiles the frontend translation unit directly so
+# the test needs neither an Engine nor the CUDA op library.
+ninfer_add_test(ninfer_qwen3_5_grammar_test
+  SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/test_grammar.cpp"
+    "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/frontend/grammar.cpp"
+  LIBRARIES $<$<BOOL:${NINFER_ENABLE_STRUCTURED_OUTPUT}>:ninfer::xgrammar>)
+set_tests_properties(ninfer_qwen3_5_grammar_test PROPERTIES SKIP_RETURN_CODE 77)

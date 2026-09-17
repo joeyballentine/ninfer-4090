@@ -116,7 +116,10 @@ Frontend 拥有模型家族的输入与输出语义：
 - owning `PreparedPrompt` 及其内容 identity；
 - stop、thinking/content channel、detokenization、最终文本和模型私有结构化输出；
 - model output 中可由历史 renderer 精确重建的 prefix-execution boundary；
-- 每个请求独占的 `OutputSession`。
+- 每个请求独占的 `OutputSession`；
+- structured output 的 token-level grammar：Frontend 针对自己的 tokenizer 编译请求 schema，
+  持有每个请求的 grammar 位置，并发布下一轮采样的 token bitmask。Engine 只搬运该 bitmask，
+  Program 负责上传到 lane 并由 sampling Op 应用。
 
 Frontend 可以预览一次模型输出将产生的语义效果，但只有 Engine 完成提交后才能发布该效果。
 Frontend 不拥有等待队列、cache catalog 或物理模型状态。
@@ -460,6 +463,10 @@ Frontend 产生的 boundary metadata 只描述当前 accepted span 内的相对�
 对应 row 搬运，不解释 delimiter，也不修改 resident identity。Program 使用 pending row 的 base frontier
 转换为绝对位置，并与 accepted token、Main/backend state 及 prefix digest 原子提交。Program commit 失败时，
 `OutputSession` 的 preview state 同样不提交；ordinary、MTP、DFlash 和 forced control 共享这一所有权链。
+
+一个 non-terminal row 可以 license 比本轮 produced 更短的前缀：structured output 只能约束 grammar
+状态已知的第一个位置，后续 speculative 位置按普通方式 verify，Frontend 在第一个越出语言的 token 处截断。
+Program 对任何被截断的提交都从已提交列重新取 continuation hidden，并丢弃本轮预测的下一批 draft。
 
 ---
 

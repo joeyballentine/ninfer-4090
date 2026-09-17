@@ -132,8 +132,43 @@ DecodeGraphExecutable& install_graph_profile(DecodeGraphFamily& family, DecodeGr
 
 } // namespace
 
+Tensor ProgramImpl::token_mask_lane(std::uint32_t lane) {
+    if (lane >= max_concurrency || token_masks.data == nullptr) {
+        throw std::logic_error("structured-output token masks have no storage for this lane");
+    }
+    return token_masks.slice(1, static_cast<std::int32_t>(lane), 1).view({token_masks.ne[0]});
+}
+
+void ProgramImpl::set_token_mask(SequenceHandle sequence, std::span<const std::uint32_t> mask) {
+    if (!valid_sequence(sequence)) {
+        throw std::logic_error("structured-output token mask has no active sequence");
+    }
+    const std::uint32_t lane = ContractAccess::lane(sequence).value;
+    if (requests[lane].lifecycle != Lifecycle::Active) {
+        throw std::logic_error("structured-output token mask requires an active request");
+    }
+    set_token_mask_lane(lane, mask);
+}
+
+void ProgramImpl::set_token_mask_lane(std::uint32_t lane, std::span<const std::uint32_t> mask) {
+    Tensor device_mask = token_mask_lane(lane);
+    if (mask.size() != static_cast<std::size_t>(device_mask.ne[0])) {
+        throw std::invalid_argument("structured-output token mask has an invalid word count");
+    }
+    RequestControl& request = requests[lane];
+    CUDA_CHECK(cudaMemcpyAsync(device_mask.data, mask.data(), device_mask.bytes(),
+                               cudaMemcpyHostToDevice, device.stream));
+    if (request.sampling_host.token_mask == device_mask.data) { return; }
+    request.sampling_host.token_mask = static_cast<const std::uint32_t*>(device_mask.data);
+    Tensor config_lane = sampling_config.slice(1, static_cast<std::int32_t>(lane), 1);
+    CUDA_CHECK(cudaMemcpyAsync(config_lane.data, &request.sampling_host,
+                               sizeof(request.sampling_host), cudaMemcpyHostToDevice,
+                               device.stream));
+}
+
 void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& request,
-                                   const ops::SamplingConfig& config) {
+                                   const ops::SamplingConfig& config,
+                                   std::span<const std::uint32_t> token_mask) {
     Tensor counts = token_counts.slice(1, static_cast<std::int32_t>(sequence.lane), 1)
                         .view({dimension(parameters.model.resources().public_token_count)});
     request.sampling_host     = config;
@@ -148,6 +183,16 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
     if (penalties) { CUDA_CHECK(cudaMemsetAsync(counts.data, 0, counts.bytes(), device.stream)); }
     request.sampling_host.token_counts =
         penalties ? static_cast<std::int32_t*>(counts.data) : nullptr;
+    request.sampling_host.token_mask = nullptr;
+    if (!token_mask.empty()) {
+        Tensor device_mask = token_mask_lane(sequence.lane);
+        if (token_mask.size() != static_cast<std::size_t>(device_mask.ne[0])) {
+            throw std::invalid_argument("structured-output token mask has an invalid word count");
+        }
+        CUDA_CHECK(cudaMemcpyAsync(device_mask.data, token_mask.data(), device_mask.bytes(),
+                                   cudaMemcpyHostToDevice, device.stream));
+        request.sampling_host.token_mask = static_cast<const std::uint32_t*>(device_mask.data);
+    }
     Tensor config_lane = sampling_config.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
     CUDA_CHECK(cudaMemcpyAsync(config_lane.data, &request.sampling_host,
                                sizeof(request.sampling_host), cudaMemcpyHostToDevice,

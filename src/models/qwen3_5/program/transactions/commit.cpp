@@ -472,10 +472,11 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
                 throw std::logic_error(
                     "active cancellation overlaps the global context transaction");
             }
+            // A non-terminal row may license fewer tokens than the round produced: a structured
+            // request truncates at the first speculative token its grammar rejects.
             if ((decision.cancelled && (decision.accepted_tokens != 0 || !decision.terminal)) ||
-                (!decision.cancelled &&
-                 (decision.accepted_tokens == 0 || decision.accepted_tokens > candidate.produced ||
-                  (!decision.terminal && decision.accepted_tokens != candidate.produced))) ||
+                (!decision.cancelled && (decision.accepted_tokens == 0 ||
+                                         decision.accepted_tokens > candidate.produced)) ||
                 (decision.prefix_execution_split_after &&
                  (decision.cancelled || *decision.prefix_execution_split_after == 0 ||
                   *decision.prefix_execution_split_after > decision.accepted_tokens))) {
