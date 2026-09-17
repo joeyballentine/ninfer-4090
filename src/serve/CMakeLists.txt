@@ -19,6 +19,7 @@ add_library(ninfer_serve STATIC
   request_log.cpp
   http_server.cpp
   openai_responses_http.cpp
+  serve_metrics.cpp
   serve_options.cpp
 )
 ninfer_internal_includes(ninfer_serve)

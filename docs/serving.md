@@ -55,6 +55,7 @@ selected for this process.
 | Method and path | Behavior |
 |---|---|
 | `GET /health` | Engine readiness |
+| `GET /metrics` | Prometheus text exposition of cumulative serving counters |
 | `GET /v1/models` | configured OpenAI model alias and effective `max_model_len` |
 | `GET /v1/models/{id}` | lookup of the configured alias and effective `max_model_len` |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
@@ -69,6 +70,32 @@ selected for this process.
 `GET /health` returns HTTP 200 with `{"status":"ok"}` while the Engine can accept work. After an
 Engine-wide failure it returns HTTP 503 with `{"status":"unavailable"}`. Temporary queue
 saturation does not make the Engine unavailable. The endpoint remains unauthenticated.
+
+### Metrics
+
+`GET /metrics` returns the Prometheus text exposition format (`text/plain; version=0.0.4`) with a
+`# HELP` and `# TYPE` line per family. Every family is a monotonic counter accumulated at the same
+terminal request boundary that writes the operational and JSONL request records, so a request is
+counted exactly once regardless of protocol or streaming mode. The endpoint requires the API key
+when `--api-key` is set.
+
+| Family | Meaning |
+|---|---|
+| `llamacpp:prompt_tokens_total` | prompt tokens actually evaluated by prefill, excluding tokens served from a reused prefix |
+| `llamacpp:prompt_seconds_total` | prefill wall seconds |
+| `llamacpp:tokens_predicted_total` | completion tokens committed by decode |
+| `llamacpp:tokens_predicted_seconds_total` | decode wall seconds |
+| `ninfer:requests_total` | terminal requests: completed, failed, or rejected |
+| `ninfer:requests_failed_total` | terminal requests that produced no completion |
+| `ninfer:reasoning_tokens_total` | completion tokens attributed to reasoning content |
+| `ninfer:prefix_cache_hit_tokens_total` | prompt tokens served from a reused KV prefix |
+| `ninfer:draft_tokens_total` | speculative draft tokens proposed |
+| `ninfer:draft_accepted_tokens_total` | speculative draft tokens accepted by verification |
+
+The four `llamacpp:` families carry llama.cpp's `--metrics` semantics and names, so an existing
+llama.cpp scrape configuration reads this server without changes. The `ninfer:` families report
+prefix reuse and speculative acceptance, which llama.cpp has no equivalent for. Counters reset when
+the process restarts; scrapers are expected to difference them.
 
 Every OpenAI-compatible response carries a unique `x-request-id` header, including streaming and
 error responses. Anthropic endpoints use their separate `request-id` contract.
@@ -738,7 +765,7 @@ curl http://127.0.0.1:8080/v1/messages/count_tokens \
 ## Authentication and CORS
 
 Pass `--api-key VALUE` to require the same value as an OpenAI bearer token or Anthropic
-`x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated.
+`x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated; `GET /metrics` does not.
 
 ```bash
 curl http://127.0.0.1:8080/v1/models \

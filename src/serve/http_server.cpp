@@ -263,18 +263,21 @@ void HttpServer::record_request_start(const RequestLogContext& context) {
 void HttpServer::record_request_rejected(const RequestRejectionLogContext& context) {
     request_jsonl_.write_request_rejected(context);
     operational_log_.request_rejected(context);
+    metrics_.record_rejected();
 }
 
 void HttpServer::record_request_done(const RequestLogContext& context,
                                      const GenerationOutcome& outcome) {
     request_jsonl_.write_request_done(context, outcome);
     operational_log_.request_done(context, outcome);
+    metrics_.record_done(outcome);
 }
 
 void HttpServer::record_request_failure(const RequestLogContext& context,
                                         const RequestFailure& failure) {
     request_jsonl_.write_request_error(context, failure.machine_message);
     operational_log_.request_failure(context, failure);
+    metrics_.record_failure(failure);
 }
 
 void HttpServer::record_response_failure(std::uint64_t request_id, const RequestFailure& failure) {
@@ -431,6 +434,9 @@ void HttpServer::register_routes() {
         res.set_content(nlohmann::json{{"status", available ? "ok" : "unavailable"}}.dump(),
                         "application/json");
     });
+    server_.Get("/metrics", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_metrics(req, res);
+    });
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
     });
@@ -475,6 +481,10 @@ void HttpServer::register_routes() {
     server_.Post("/v1/messages", [this](const httplib::Request& req, httplib::Response& res) {
         handle_messages(req, res);
     });
+}
+
+void HttpServer::handle_metrics(const httplib::Request&, httplib::Response& res) const {
+    res.set_content(metrics_.render(), "text/plain; version=0.0.4; charset=utf-8");
 }
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {
