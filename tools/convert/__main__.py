@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from contextlib import ExitStack
 import importlib.util
+import inspect
 from pathlib import Path
 import sys
 from collections.abc import Mapping
@@ -81,6 +82,15 @@ def _function(value: str):
     return result
 
 
+def _invoke(entry, model, recipe, sources, calibration) -> bool:
+    """Run one recipe entry, supplying --calibration when it declares it."""
+    if "calibration" not in inspect.signature(entry).parameters:
+        entry(model, recipe, sources)
+        return False
+    entry(model, recipe, sources, calibration=calibration)
+    return True
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -118,6 +128,13 @@ def main(argv=None):
         help="override a final frontend resource",
     )
     parser.add_argument(
+        "--calibration",
+        type=Path,
+        help="directory of per-input calibration Hessians produced by"
+        " tools/calibrate_hessians.py; recipes declaring a calibration keyword"
+        " receive it",
+    )
+    parser.add_argument(
         "--proposal",
         action="store_true",
         help="include the existing indexed proposal head",
@@ -149,12 +166,24 @@ def main(argv=None):
             companions=companions,
             resource_overrides=overrides,
         )
+        if args.calibration is not None and not args.calibration.is_dir():
+            raise ValueError(
+                f"calibration directory does not exist: {args.calibration}"
+            )
         recipe = Recipe(model)
-        _function(args.recipe)(model, recipe, sources)
+        used = _invoke(
+            _function(args.recipe), model, recipe, sources, args.calibration
+        )
         if args.proposal:
             add_official_proposal(recipe, ranking=args.ranking, rows=args.proposal_rows)
         if args.override:
-            _function(args.override)(model, recipe, sources)
+            used |= _invoke(
+                _function(args.override), model, recipe, sources, args.calibration
+            )
+        if args.calibration is not None and not used:
+            raise ValueError(
+                "--calibration was supplied but no selected recipe accepts it"
+            )
 
         def progress(index, total, job):
             label = job.parameters[0]
@@ -172,6 +201,8 @@ def main(argv=None):
         }
         if args.override:
             provenance["override"] = args.override
+        if args.calibration is not None:
+            provenance["calibration"] = str(args.calibration)
         if args.proposal:
             provenance["ranking"] = str(args.ranking)
         report = convert(
