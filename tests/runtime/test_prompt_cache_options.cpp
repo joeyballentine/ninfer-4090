@@ -26,7 +26,8 @@ ninfer::EngineOptions generation_options() {
     options.kv_capacity           = ninfer::KvCapacityPolicy::explicit_capacity(4096);
     options.max_concurrency       = 2;
     options.context_cache.enabled = true;
-    options.prompt_cache.enabled  = true;
+    options.context_cache.host_kv_capacity_bytes = 256ULL << 20;
+    options.prompt_cache.enabled                 = true;
     return options;
 }
 
@@ -73,6 +74,14 @@ int main() {
                           return ninfer::runtime::normalize_engine_options(options);
                       }),
                       "the prompt cache was accepted with a zero size cap");
+    // A record is a State image plus a KV page stream. With no Host KV arena the pages never
+    // reach the host, so the tier would have nothing to capture and nowhere to restore into.
+    failures += check(rejected([] {
+                          ninfer::EngineOptions options                = generation_options();
+                          options.context_cache.host_kv_capacity_bytes = 0;
+                          return ninfer::runtime::normalize_engine_options(options);
+                      }),
+                      "the prompt cache was accepted with no Host KV capacity");
 
     // Scoring publishes no checkpoint, so the purpose clears the tier instead of rejecting it.
     ninfer::EngineOptions scoring = generation_options();

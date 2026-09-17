@@ -28,4 +28,4 @@ ninfer_add_test(ninfer_context_cache_signature_test
 
 ninfer_add_test(ninfer_prompt_cache_options_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_prompt_cache_options.cpp"
-  LIBRARIES ninfer_engine ninfer_runtime_support)
+  LIBRARIES ninfer_engine ninfer_runtime_support ninfer::json)

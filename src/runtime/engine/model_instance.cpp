@@ -130,6 +130,13 @@ EngineOptions normalize_engine_options(EngineOptions options) {
             throw std::invalid_argument(
                 "the prompt cache requires at least one Host State slot to restore into");
         }
+        // A record is a State image plus a KV page stream. Without a Host KV arena a checkpoint's
+        // pages never reach the host, so nothing is ever capturable and nothing can be restored
+        // into either.
+        if (cache.host_kv_capacity_bytes == 0) {
+            throw std::invalid_argument(
+                "the prompt cache requires a nonzero Host KV capacity to capture KV pages from");
+        }
     }
     if (!cache.enabled) {
         if ((cache.device_state_slots && *cache.device_state_slots != 0) ||

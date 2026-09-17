@@ -272,17 +272,35 @@ public:
         }
     }
 
-    // The Engine owns the persistent third tier and the physical adoption of one of its records.
+    // The Engine owns the persistent third tier and binds it to the Program that performs its
+    // transfers. Passing a null tier detaches.
+    //
+    // `prepare_private` / `prepare_shared` run before a spill is queued: the Program pins the
+    // checkpoint's Host replicas and returns the token the spill must carry, or a disengaged
+    // result when the checkpoint is not spillable, in which case the offer is dropped. Without
+    // that token the tier's I/O thread would have to read Program state it does not own.
+    //
     // `adopt` turns a restored record into a Program continuation plus the summary the Program
     // assigned it; a disengaged result means the restore could not be adopted and the request
-    // falls back to prefill. Passing a null tier detaches.
-    using DiskRecordAdoption = std::function<std::optional<std::pair<ContinuationHandle,
-                                                                     ContinuationSummary>>(
-        const DiskRecordDescriptor&)>;
+    // falls back to prefill. An unset `adopt` disables the lookup hook entirely, so no record is
+    // ever read back and no I/O is spent on a restore nothing can consume.
+    using DiskRecordAdoption =
+        std::function<std::optional<std::pair<ContinuationHandle, ContinuationSummary>>(
+            const DiskRecordDescriptor&)>;
+    using DiskPrivateCapture =
+        std::function<std::optional<std::uint64_t>(const ContinuationHandle&, CheckpointRef)>;
+    using DiskSharedCapture =
+        std::function<std::optional<std::uint64_t>(const SharedPrefixHandle&, CheckpointRef)>;
 
-    void attach_disk_tier(ContextDiskTier* tier, DiskRecordAdoption adopt) {
-        disk_tier_      = tier;
-        disk_adoption_  = std::move(adopt);
+    struct DiskTierBinding {
+        DiskPrivateCapture prepare_private;
+        DiskSharedCapture prepare_shared;
+        DiskRecordAdoption adopt;
+    };
+
+    void attach_disk_tier(ContextDiskTier* tier, DiskTierBinding binding) {
+        disk_tier_ = tier;
+        disk_      = std::move(binding);
     }
 
     [[nodiscard]] Inspection inspect(Program& program, const PreparedPrompt& prompt,
@@ -997,11 +1015,11 @@ public:
         release_active_references(lane);
         publication.state = CatalogState::Catalogued;
         assign_continuation_summary(publication.summary, result.summary);
-        // Write-behind: offering the freshly catalogued endpoint now means the disk copy already
-        // exists when the host slot is later evicted, which is when its pages are gone.
-        offer_owner_to_disk_tier(publication.summary, publication.id);
         publication.handle.emplace(std::move(*result.continuation));
         result.continuation.reset();
+        // Write-behind: offering the freshly catalogued endpoint now means the disk copy already
+        // exists when the host slot is later evicted, which is when its pages are gone.
+        offer_owner_to_disk_tier(publication.summary, *publication.handle);
         publication.session   = active.session;
         publication.retention = active.retention;
         migrate_observations(publication, result.summary, active.retention);
@@ -1113,7 +1131,7 @@ public:
         out.prompt_cache_restores       = context_stats_.prompt_cache_restores;
         out.prompt_cache_spill_requests = context_stats_.prompt_cache_spill_requests;
         if (disk_tier_ != nullptr) {
-            const ContextDiskTierStats disk = disk_tier_->stats();
+            const ContextDiskTierStats disk   = disk_tier_->stats();
             out.prompt_cache_restore_failures = disk.restore_failures;
             out.prompt_cache_restored_bytes   = disk.restored_bytes;
             out.prompt_cache_spills           = disk.spills_published;
@@ -1626,31 +1644,41 @@ private:
                              .identity_tag = key.identity_tag};
     }
 
-    template <class Checkpoint>
-    void offer_checkpoint_to_disk_tier(const Checkpoint& checkpoint,
-                                       std::uint64_t owner_id) noexcept {
-        if (disk_tier_ == nullptr || checkpoint.shortlist_key.frontier == 0) { return; }
+    template <class Checkpoint, class Handle, class Prepare>
+    void offer_checkpoint_to_disk_tier(const Checkpoint& checkpoint, const Handle& owner,
+                                       const Prepare& prepare) noexcept {
+        if (disk_tier_ == nullptr || !prepare || checkpoint.shortlist_key.frontier == 0) { return; }
         // A Device-only checkpoint would have to be read back over the transfer stream that the
         // decode round is using. Only replicas already resident on the host are offered.
         if (checkpoint.state_residency == ReplicaResidency::DeviceOnly) { return; }
+        std::optional<std::uint64_t> token;
+        try {
+            token = prepare(owner, checkpoint.ref);
+        } catch (...) { return; }
+        // Disengaged means the Program could not pin this checkpoint's Host replicas, most often
+        // because its KV pages are still Device-only. It becomes offerable again the next time
+        // pressure moves it to the host, which is where the retained-owner offer picks it up.
+        if (!token) { return; }
         disk_tier_->request_spill(
-            DiskSpillRequest{.key = disk_key(checkpoint.shortlist_key), .owner_token = owner_id});
+            DiskSpillRequest{.key = disk_key(checkpoint.shortlist_key), .owner_token = *token});
         saturating_increment(context_stats_.prompt_cache_spill_requests);
     }
 
     void offer_owner_to_disk_tier(const ContinuationSummary& summary,
-                                  std::uint64_t owner_id) noexcept {
-        if (disk_tier_ == nullptr) { return; }
-        if (summary.endpoint) { offer_checkpoint_to_disk_tier(*summary.endpoint, owner_id); }
+                                  const ContinuationHandle& owner) noexcept {
+        if (disk_tier_ == nullptr || !disk_.prepare_private) { return; }
+        if (summary.endpoint) {
+            offer_checkpoint_to_disk_tier(*summary.endpoint, owner, disk_.prepare_private);
+        }
         for (const auto& anchor : summary.long_anchors) {
-            offer_checkpoint_to_disk_tier(anchor, owner_id);
+            offer_checkpoint_to_disk_tier(anchor, owner, disk_.prepare_private);
         }
     }
 
     // Returns true when a disk record was adopted into a catalog slot, so the prefix index needs
     // rebuilding before candidates are enumerated.
     [[nodiscard]] bool restore_from_disk_tier(const RequestBasePlan& base) {
-        if (!disk_adoption_) { return false; }
+        if (!disk_.adopt) { return false; }
         std::uint32_t resident_frontier = 0;
         for (const PrefixIndexEntry& index : prefix_index_) {
             if (!valid_prefix_index_entry(index)) { continue; }
@@ -1688,7 +1716,7 @@ private:
         if (!disk_tier_->restore(*record)) { return false; }
 
         std::optional<std::pair<ContinuationHandle, ContinuationSummary>> adopted =
-            disk_adoption_(*record);
+            disk_.adopt(*record);
         if (!adopted) { return false; }
         if (!valid_continuation_summary(adopted->second)) {
             (void)adopted;
@@ -2730,7 +2758,10 @@ private:
         const std::uint32_t dropped =
             dropped_checkpoint_count(entry.summary, result.final_summary, result.disposition);
         if (result.disposition == VictimDisposition::Evicted) {
-            offer_owner_to_disk_tier(entry.summary, entry.id);
+            // Nothing is offered here: the Program has already released this owner's replicas, so
+            // there is nothing left to capture. The write-behind at publication and the offer
+            // below, which fires when pressure moves an owner to the host, are what put a record
+            // on disk before it can be evicted at all.
             erase_session_if_owner(claim.capability.owner.id);
             clear_catalog_entry(entry);
             saturating_increment(context_stats_.pressure_private_owners_evicted);
@@ -2745,6 +2776,10 @@ private:
         migrate_observations(entry, *result.final_summary, entry.retention);
         advance_revision(entry.revision);
         refresh_session_owner_revision(claim.capability.owner.id, slot, entry.revision);
+        // Pressure has just moved part of this owner to the host. That is the first moment a
+        // checkpoint the publication offer could not capture becomes capturable, and the last
+        // moment before eviction at which its bytes still exist.
+        if (entry.handle) { offer_owner_to_disk_tier(entry.summary, *entry.handle); }
         saturating_increment(context_stats_.pressure_private_owners_degraded);
         record_checkpoint_drops(context_stats_, dropped);
         entry.state = CatalogState::Catalogued;
@@ -2758,7 +2793,6 @@ private:
         SharedCatalogEntry& entry   = shared_catalog_[slot];
         const std::uint32_t dropped = result.disposition == VictimDisposition::Evicted ? 1U : 0U;
         if (result.disposition == VictimDisposition::Evicted) {
-            offer_checkpoint_to_disk_tier(entry.summary.checkpoint, entry.id);
             clear_shared_entry(entry);
             saturating_increment(context_stats_.pressure_shared_owners_evicted);
             record_checkpoint_drops(context_stats_, dropped);
@@ -3242,6 +3276,10 @@ private:
                            : demand_epoch_ + kDemandWindowCapacity)
                     : 0;
             advance_revision(publication.revision);
+            // A shared stable prefix is the checkpoint a persistent store exists for: it is the
+            // one every later process start wants back. Offer it as soon as it is catalogued.
+            offer_checkpoint_to_disk_tier(publication.summary.checkpoint, *publication.handle,
+                                          disk_.prepare_shared);
             active.shared_sources.push_back(
                 active_edge(shared_capability(record->publication_slot)));
         }
@@ -3505,7 +3543,7 @@ private:
     std::vector<SessionIndexEntry> session_index_;
     std::vector<PrefixIndexEntry> prefix_index_;
     ContextDiskTier* disk_tier_ = nullptr;
-    DiskRecordAdoption disk_adoption_;
+    DiskTierBinding disk_;
     std::vector<DiskRecordKey> disk_probe_keys_;
     std::vector<CheckpointObservation> observation_scratch_;
     std::vector<PrefixDemandRecord> demand_window_;

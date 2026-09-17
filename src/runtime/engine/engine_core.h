@@ -8,6 +8,7 @@
 #include "runtime/contract/execution.h"
 #include "runtime/contract/resources.h"
 #include "runtime/engine/request_record.h"
+#include "runtime/engine/context_cache/context_disk_tier.h"
 #include "runtime/engine/context_cache/resource_manager.h"
 #include "runtime/engine/scheduler.h"
 #include "runtime/engine/generation_budget.h"
@@ -29,6 +30,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -63,7 +65,7 @@ public:
     using Clock              = std::chrono::steady_clock;
 
     EngineCore(Instance& instance, DeviceContext& device, const EngineOptions& options,
-               ContextMachineCostModel context_cost)
+               ContextMachineCostModel context_cost, std::string_view artifact_identity)
         : instance_(instance), device_(device), max_context_(options.max_context),
           max_concurrency_(options.max_concurrency),
           max_outstanding_(static_cast<std::size_t>(options.max_concurrency) +
@@ -81,6 +83,36 @@ public:
         if (!options.context_cache.max_private_continuations ||
             !options.context_cache.max_shared_prefixes) {
             throw std::logic_error("target admission capacity does not match the Engine");
+        }
+        // The persistent third tier is built before the worker exists, so a store that cannot be
+        // opened fails Engine construction instead of silently disabling itself later. The
+        // signature is the Program's, because only it knows which facts change what a stored page
+        // means; a store carrying a different one is never matched.
+        if (options.prompt_cache.enabled) {
+            disk_tier_ = std::make_unique<ContextDiskTier>(
+                resolve_prompt_cache_config(
+                    options, instance_.program->context_cache_signature(artifact_identity)),
+                instance_.program->prompt_cache_port());
+            resources_.attach_disk_tier(
+                disk_tier_.get(),
+                typename ResourceManagement::DiskTierBinding{
+                    .prepare_private =
+                        [program = instance_.program.get()](
+                            const typename ModelContract::ContinuationHandle& owner,
+                            CheckpointRef checkpoint) {
+                            return program->prepare_prompt_cache_capture(owner, checkpoint);
+                        },
+                    .prepare_shared =
+                        [program = instance_.program.get()](
+                            const typename ModelContract::SharedPrefixHandle& owner,
+                            CheckpointRef checkpoint) {
+                            return program->prepare_prompt_cache_capture(owner, checkpoint);
+                        },
+                    // The lookup hook stays unset: turning a restored record back into a
+                    // continuation needs a Program transaction that does not exist yet, and
+                    // reading a record nothing can adopt would spend I/O for nothing.
+                    .adopt = {},
+                });
         }
         std::promise<void> startup;
         std::future<void> started = startup.get_future();
@@ -109,6 +141,14 @@ public:
         }
         queue_cv_.notify_all();
         if (worker_.joinable()) { worker_.join(); }
+        // Teardown order is fixed by the port's thread contract: detach first so nothing offers
+        // another spill, then destroy the tier, which joins its I/O thread after finishing the
+        // record it was writing and dropping the ones it had not started, and only then release
+        // the pins those captures held. The Program outlives all three, so the I/O thread can
+        // never read Host memory that has already been freed.
+        resources_.attach_disk_tier(nullptr, {});
+        disk_tier_.reset();
+        instance_.program->release_finished_prompt_cache_captures();
     }
 
     EngineCore(const EngineCore&)            = delete;
@@ -1988,7 +2028,11 @@ private:
             try {
                 set_host_work_class(HostWorkClass::Control);
                 HostPhaseMeasurement boundary = begin_host_phase();
-                const bool have_pending       = expire_pending_requests();
+                // Captures the disk tier has finished still pin Host replicas the planner would
+                // otherwise be free to move. Releasing them at the boundary keeps a spill from
+                // outliving the round that offered it.
+                if (disk_tier_) { instance_.program->release_finished_prompt_cache_captures(); }
+                const bool have_pending = expire_pending_requests();
                 (void)progress_context_transaction(have_pending);
                 (void)settle_terminal_requests(boundary);
                 const auto cancelled_at_boundary = snapshot_cancellations();
@@ -2069,6 +2113,9 @@ private:
     const std::size_t max_outstanding_;
     const std::chrono::milliseconds pending_timeout_;
     ResourceManagement resources_;
+    // Persistent third context tier. Present only with `--prompt-cache`; owning it here is what
+    // makes it outlive every round and die before the Program.
+    std::unique_ptr<ContextDiskTier> disk_tier_;
 
     mutable std::mutex execution_mutex_;
     mutable std::mutex queue_mutex_;

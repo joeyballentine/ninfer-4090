@@ -174,7 +174,8 @@ public:
             core = std::make_unique<ScoringCore>(*active, device);
         } else {
             core = std::make_unique<GenerationCore>(*active, device, options,
-                                                    std::move(constructed.context_cost));
+                                                    std::move(constructed.context_cost),
+                                                    load.prefill_signature);
         }
         finalize_phase.complete();
     }
