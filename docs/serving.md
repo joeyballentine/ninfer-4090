@@ -112,15 +112,30 @@ is set.
 | `ninfer:requests_prefilling` | gauge: lane-resident requests still evaluating their prompt |
 | `ninfer:requests_decode_ready` | gauge: lane-resident requests eligible for the next decode round |
 | `ninfer:requests_materializing` | gauge: requests whose model state is being materialized onto a lane |
+| `ninfer:prompt_cache_lookups_total` | disk index probes made after the Device and Host context tiers missed |
+| `ninfer:prompt_cache_hits_total` | probes that matched a published record |
+| `ninfer:prompt_cache_restores_total` | records read back and adopted as a resident context source |
+| `ninfer:prompt_cache_restore_failures_total` | matched records that could not be read back or adopted |
+| `ninfer:prompt_cache_restored_bytes_total` | payload bytes read back from the store |
+| `ninfer:prompt_cache_spill_requests_total` | checkpoints offered to the disk tier |
+| `ninfer:prompt_cache_spills_total` | offered checkpoints written and published as a record |
+| `ninfer:prompt_cache_spills_dropped_total` | offered checkpoints dropped before publication |
+| `ninfer:prompt_cache_spilled_bytes_total` | payload bytes staged for published records |
+| `ninfer:prompt_cache_evictions_total` | records retired by the size cap, least recently used first |
+| `ninfer:prompt_cache_compactions_total` | mark-and-sweep rewrites of the extent file |
+| `ninfer:prompt_cache_records` | gauge: records currently published in the store |
+| `ninfer:prompt_cache_live_bytes` | gauge: extent bytes referenced by a published record |
+| `ninfer:prompt_cache_file_bytes` | gauge: bytes the store occupies on disk |
 
 The four `llamacpp:` counter families carry llama.cpp's `--metrics` semantics and names, so an
 existing llama.cpp scrape configuration reads this server without changes. The `ninfer:` families
-report prefix reuse and speculative acceptance, which llama.cpp has no equivalent for. Counters
-reset when the process restarts; scrapers are expected to difference them.
+report prefix reuse, speculative acceptance and the persistent prompt cache, which llama.cpp has no
+equivalent for. Counters reset when the process restarts; scrapers are expected to difference them.
 
-The five gauges are read from the Engine's published runtime snapshot at scrape time, not
-recomputed by the HTTP layer, so they report the executor's own occupancy rather than the number of
-open HTTP requests.
+The gauges are read from the Engine's published runtime snapshot at scrape time, not recomputed by
+the HTTP layer, so they report the executor's own occupancy rather than the number of open HTTP
+requests. The `prompt_cache` families come from the same snapshot and stay at zero unless
+`--prompt-cache` is on, so a scrape configuration does not have to know whether it is enabled.
 
 ### Slots
 

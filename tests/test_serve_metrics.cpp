@@ -217,6 +217,57 @@ int main() {
                           drained.at("slots").at(0).at("state") == "idle",
                       "lane assignment exceeded the tracked in-flight requests");
 
+    // The persistent prompt-cache families are always exported so a scrape config does not have
+    // to know whether --prompt-cache is on; they read zero while the tier is absent.
+    const Exposition idle_cache = parse(metrics.render(gauges(1, 0, 0)));
+    failures += check(idle_cache.samples.at("ninfer:prompt_cache_lookups_total") == 0.0 &&
+                          idle_cache.samples.at("ninfer:prompt_cache_records") == 0.0,
+                      "prompt cache families are missing when the disk tier is disabled");
+
+    ninfer::RuntimeStats stats;
+    stats.prompt_cache_lookups          = 11;
+    stats.prompt_cache_hits             = 7;
+    stats.prompt_cache_restores         = 5;
+    stats.prompt_cache_restore_failures = 2;
+    stats.prompt_cache_restored_bytes   = 4096;
+    stats.prompt_cache_spill_requests   = 9;
+    stats.prompt_cache_spills           = 6;
+    stats.prompt_cache_spills_dropped   = 3;
+    stats.prompt_cache_spilled_bytes    = 8192;
+    stats.prompt_cache_records          = 4;
+    stats.prompt_cache_evictions        = 1;
+    stats.prompt_cache_compactions      = 2;
+    stats.prompt_cache_live_bytes       = 65536;
+    stats.prompt_cache_file_bytes       = 131072;
+    ninfer::serve::ServeOptions cache_options;
+    cache_options.max_concurrency = 1;
+    cache_options.max_context     = 65536;
+    const Exposition live_cache =
+        parse(metrics.render(ninfer::serve::make_executor_gauges(cache_options, stats)));
+    failures +=
+        check(live_cache.samples.at("ninfer:prompt_cache_lookups_total") == 11.0 &&
+                  live_cache.samples.at("ninfer:prompt_cache_hits_total") == 7.0 &&
+                  live_cache.samples.at("ninfer:prompt_cache_restores_total") == 5.0 &&
+                  live_cache.samples.at("ninfer:prompt_cache_restore_failures_total") == 2.0 &&
+                  live_cache.samples.at("ninfer:prompt_cache_restored_bytes_total") == 4096.0,
+              "prompt cache restore counters are not taken from RuntimeStats");
+    failures +=
+        check(live_cache.samples.at("ninfer:prompt_cache_spill_requests_total") == 9.0 &&
+                  live_cache.samples.at("ninfer:prompt_cache_spills_total") == 6.0 &&
+                  live_cache.samples.at("ninfer:prompt_cache_spills_dropped_total") == 3.0 &&
+                  live_cache.samples.at("ninfer:prompt_cache_spilled_bytes_total") == 8192.0,
+              "prompt cache spill counters are not taken from RuntimeStats");
+    failures += check(live_cache.samples.at("ninfer:prompt_cache_records") == 4.0 &&
+                          live_cache.samples.at("ninfer:prompt_cache_evictions_total") == 1.0 &&
+                          live_cache.samples.at("ninfer:prompt_cache_compactions_total") == 2.0 &&
+                          live_cache.samples.at("ninfer:prompt_cache_live_bytes") == 65536.0 &&
+                          live_cache.samples.at("ninfer:prompt_cache_file_bytes") == 131072.0,
+                      "prompt cache store occupancy is not taken from RuntimeStats");
+    failures += check(live_cache.types.at("ninfer:prompt_cache_records") == "gauge" &&
+                          live_cache.types.at("ninfer:prompt_cache_live_bytes") == "gauge" &&
+                          live_cache.types.at("ninfer:prompt_cache_lookups_total") == "counter",
+                      "prompt cache occupancy and cumulative families are typed incorrectly");
+
     if (failures == 0) { std::cout << "serve metrics OK\n"; }
     return failures == 0 ? 0 : 1;
 }

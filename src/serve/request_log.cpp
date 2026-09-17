@@ -18,9 +18,9 @@
 #include <utility>
 
 #ifdef _WIN32
-#include <process.h>
+#    include <process.h>
 #else
-#include <unistd.h>
+#    include <unistd.h>
 #endif
 
 namespace ninfer::serve {
@@ -792,7 +792,34 @@ std::string format_throughput_json(const std::string& server_instance_id, std::u
                            {"host_kv_bytes", current.host_kv_occupied_bytes},
                            {"shared_active_references", current.shared_active_references}}},
         {"actual_transfer_seconds", monotonic_delta(previous.actual_context_transfer_seconds,
-                                                    current.actual_context_transfer_seconds)}};
+                                                    current.actual_context_transfer_seconds)},
+        // Persistent third tier. Counts are interval deltas like the rest of this record; the
+        // store's occupancy is reported as the current value, not a delta.
+        {"prompt_cache",
+         Json{
+             {"lookups",
+              monotonic_delta(previous.prompt_cache_lookups, current.prompt_cache_lookups)},
+             {"hits", monotonic_delta(previous.prompt_cache_hits, current.prompt_cache_hits)},
+             {"restores",
+              monotonic_delta(previous.prompt_cache_restores, current.prompt_cache_restores)},
+             {"restore_failures", monotonic_delta(previous.prompt_cache_restore_failures,
+                                                  current.prompt_cache_restore_failures)},
+             {"restored_bytes", monotonic_delta(previous.prompt_cache_restored_bytes,
+                                                current.prompt_cache_restored_bytes)},
+             {"spill_requests", monotonic_delta(previous.prompt_cache_spill_requests,
+                                                current.prompt_cache_spill_requests)},
+             {"spills", monotonic_delta(previous.prompt_cache_spills, current.prompt_cache_spills)},
+             {"spills_dropped", monotonic_delta(previous.prompt_cache_spills_dropped,
+                                                current.prompt_cache_spills_dropped)},
+             {"spilled_bytes", monotonic_delta(previous.prompt_cache_spilled_bytes,
+                                               current.prompt_cache_spilled_bytes)},
+             {"evictions",
+              monotonic_delta(previous.prompt_cache_evictions, current.prompt_cache_evictions)},
+             {"compactions",
+              monotonic_delta(previous.prompt_cache_compactions, current.prompt_cache_compactions)},
+             {"store", Json{{"records", current.prompt_cache_records},
+                            {"live_bytes", current.prompt_cache_live_bytes},
+                            {"file_bytes", current.prompt_cache_file_bytes}}}}}};
     return record.dump();
 }
 

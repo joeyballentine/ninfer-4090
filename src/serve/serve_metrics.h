@@ -26,6 +26,26 @@ namespace ninfer::serve {
 // Engine-owned occupancy, read from the Engine's published RuntimeStats snapshot. The serve layer
 // never recomputes these numbers: whether a submitted request currently occupies an execution lane
 // is the executor's answer, not the HTTP layer's.
+// Persistent prompt-cache tier counters, copied verbatim from the Engine's RuntimeStats. They are
+// cumulative for the life of the process except `records`, `live_bytes` and `file_bytes`, which are
+// the store's current occupancy. All of them stay zero when `--prompt-cache` is off.
+struct PromptCacheGauges {
+    std::uint64_t lookups          = 0;
+    std::uint64_t hits             = 0;
+    std::uint64_t restores         = 0;
+    std::uint64_t restore_failures = 0;
+    std::uint64_t restored_bytes   = 0;
+    std::uint64_t spill_requests   = 0;
+    std::uint64_t spills           = 0;
+    std::uint64_t spills_dropped   = 0;
+    std::uint64_t spilled_bytes    = 0;
+    std::uint64_t records          = 0;
+    std::uint64_t evictions        = 0;
+    std::uint64_t compactions      = 0;
+    std::uint64_t live_bytes       = 0;
+    std::uint64_t file_bytes       = 0;
+};
+
 struct ExecutorGauges {
     std::uint32_t max_concurrency = 0;
     std::uint32_t max_context     = 0;
@@ -35,6 +55,7 @@ struct ExecutorGauges {
     std::uint32_t waiting         = 0;
     std::uint32_t materializing   = 0;
     bool speculative              = false;
+    PromptCacheGauges prompt_cache;
 };
 
 [[nodiscard]] ExecutorGauges make_executor_gauges(const ServeOptions& options,

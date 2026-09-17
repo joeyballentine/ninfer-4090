@@ -89,6 +89,47 @@ constexpr Family kDecodeReady{"ninfer:requests_decode_ready", "gauge",
 constexpr Family kMaterializing{"ninfer:requests_materializing", "gauge",
                                 "Requests whose model state is being materialized onto a lane."};
 
+// Persistent prompt-cache tier. `lookups`/`hits` count disk index probes made after Device and
+// Host missed, so `hits - restores` is the share of index hits that could not be brought back.
+constexpr Family kPromptCacheLookups{"ninfer:prompt_cache_lookups_total", "counter",
+                                     "Disk index probes made after the Device and Host context "
+                                     "tiers missed."};
+constexpr Family kPromptCacheHits{"ninfer:prompt_cache_hits_total", "counter",
+                                  "Disk index probes that matched a published record."};
+constexpr Family kPromptCacheRestores{"ninfer:prompt_cache_restores_total", "counter",
+                                      "Disk records read back and adopted as a resident context "
+                                      "source."};
+constexpr Family kPromptCacheRestoreFailures{
+    "ninfer:prompt_cache_restore_failures_total", "counter",
+    "Matched records the Program declined or could not read back; the request falls back to "
+    "prefill."};
+constexpr Family kPromptCacheRestoredBytes{"ninfer:prompt_cache_restored_bytes_total", "counter",
+                                           "Payload bytes read back from the store."};
+constexpr Family kPromptCacheSpillRequests{"ninfer:prompt_cache_spill_requests_total", "counter",
+                                           "Checkpoints offered to the disk tier by write-behind "
+                                           "publication or eviction."};
+constexpr Family kPromptCacheSpills{"ninfer:prompt_cache_spills_total", "counter",
+                                    "Offered checkpoints written and published as a record."};
+constexpr Family kPromptCacheSpillsDropped{
+    "ninfer:prompt_cache_spills_dropped_total", "counter",
+    "Offered checkpoints dropped by queue pressure, request-arrival cancellation, a vanished "
+    "owner, or an I/O failure."};
+constexpr Family kPromptCacheSpilledBytes{"ninfer:prompt_cache_spilled_bytes_total", "counter",
+                                          "Payload bytes staged for published records."};
+constexpr Family kPromptCacheRecords{"ninfer:prompt_cache_records", "gauge",
+                                     "Records currently published in the store."};
+constexpr Family kPromptCacheEvictions{"ninfer:prompt_cache_evictions_total", "counter",
+                                       "Records retired by the size cap, least recently used "
+                                       "first."};
+constexpr Family kPromptCacheCompactions{"ninfer:prompt_cache_compactions_total", "counter",
+                                         "Mark-and-sweep rewrites of the extent file."};
+constexpr Family kPromptCacheLiveBytes{"ninfer:prompt_cache_live_bytes", "gauge",
+                                       "Extent bytes referenced by a published record; this is "
+                                       "what --prompt-cache-max-bytes caps."};
+constexpr Family kPromptCacheFileBytes{"ninfer:prompt_cache_file_bytes", "gauge",
+                                       "Bytes the store occupies on disk, including extents not "
+                                       "yet reclaimed by compaction."};
+
 } // namespace
 
 ExecutorGauges make_executor_gauges(const ServeOptions& options,
@@ -102,6 +143,23 @@ ExecutorGauges make_executor_gauges(const ServeOptions& options,
         .waiting         = stats.waiting_requests,
         .materializing   = stats.materializing_requests,
         .speculative     = options.speculative.backend != ninfer::SpeculativeBackend::None,
+        .prompt_cache =
+            PromptCacheGauges{
+                .lookups          = stats.prompt_cache_lookups,
+                .hits             = stats.prompt_cache_hits,
+                .restores         = stats.prompt_cache_restores,
+                .restore_failures = stats.prompt_cache_restore_failures,
+                .restored_bytes   = stats.prompt_cache_restored_bytes,
+                .spill_requests   = stats.prompt_cache_spill_requests,
+                .spills           = stats.prompt_cache_spills,
+                .spills_dropped   = stats.prompt_cache_spills_dropped,
+                .spilled_bytes    = stats.prompt_cache_spilled_bytes,
+                .records          = stats.prompt_cache_records,
+                .evictions        = stats.prompt_cache_evictions,
+                .compactions      = stats.prompt_cache_compactions,
+                .live_bytes       = stats.prompt_cache_live_bytes,
+                .file_bytes       = stats.prompt_cache_file_bytes,
+            },
     };
 }
 
@@ -245,6 +303,21 @@ std::string ServeMetrics::render(const ExecutorGauges& gauges) const {
     append_sample(out, kPrefilling, static_cast<std::uint64_t>(gauges.prefilling));
     append_sample(out, kDecodeReady, static_cast<std::uint64_t>(gauges.decode_ready));
     append_sample(out, kMaterializing, static_cast<std::uint64_t>(gauges.materializing));
+    const PromptCacheGauges& cache = gauges.prompt_cache;
+    append_sample(out, kPromptCacheLookups, cache.lookups);
+    append_sample(out, kPromptCacheHits, cache.hits);
+    append_sample(out, kPromptCacheRestores, cache.restores);
+    append_sample(out, kPromptCacheRestoreFailures, cache.restore_failures);
+    append_sample(out, kPromptCacheRestoredBytes, cache.restored_bytes);
+    append_sample(out, kPromptCacheSpillRequests, cache.spill_requests);
+    append_sample(out, kPromptCacheSpills, cache.spills);
+    append_sample(out, kPromptCacheSpillsDropped, cache.spills_dropped);
+    append_sample(out, kPromptCacheSpilledBytes, cache.spilled_bytes);
+    append_sample(out, kPromptCacheRecords, cache.records);
+    append_sample(out, kPromptCacheEvictions, cache.evictions);
+    append_sample(out, kPromptCacheCompactions, cache.compactions);
+    append_sample(out, kPromptCacheLiveBytes, cache.live_bytes);
+    append_sample(out, kPromptCacheFileBytes, cache.file_bytes);
     return out;
 }
 
