@@ -2,6 +2,7 @@
 #include "models/qwen3_5/program/context_work.h"
 #include "models/qwen3_5/program/context.h"
 #include "models/qwen3_5/program/graph_execution.h"
+#include "models/qwen3_5/program/speculative/prompt_lookup.h"
 #include "core/nvtx.h"
 #include "core/device.h"
 #include "ninfer/ops/prepare_ragged_prefix.h"
@@ -454,8 +455,18 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         }
 
         for (std::size_t row = 0; row < lanes.size(); ++row) {
-            SequenceState& sequence           = active_sequence(lanes[row]);
-            const RequestControl& request     = requests[lanes[row]];
+            SequenceState& sequence       = active_sequence(lanes[row]);
+            const RequestControl& request = requests[lanes[row]];
+            // Prompt lookup. A repeated n-gram in this sequence's own history predicts its
+            // continuation without any draft weights, so it replaces the MTP head's proposal
+            // whenever it matches. The head re-proposes from the accepted hidden state at the
+            // end of every round, so a replaced proposal is never reused.
+            if (const PromptLookupDraft lookup =
+                    find_prompt_lookup_draft(sequence.ledger, draft_window);
+                lookup.count != 0) {
+                sequence.mtp_draft_count = lookup.count;
+                std::copy_n(lookup.tokens.begin(), lookup.count, sequence.mtp_drafts.begin());
+            }
             const std::uint32_t frontier      = sequence.execution_frontier;
             const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
                                                     ? budgets[row].generated_tokens_remaining - 1

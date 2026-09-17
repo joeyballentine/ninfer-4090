@@ -177,6 +177,14 @@ may be combined with `--vision`.
   --lm-head-draft
 ```
 
+MTP additionally drafts by prompt lookup, with no extra weights, memory or options. Before each
+round the Program looks for the most recent earlier occurrence of the sequence's current tail in
+its own committed tokens, trying n-gram orders five, four and three, longest order first, and
+drafts the tokens that followed that occurrence. A match replaces the MTP head's proposal for that
+round and the target verifies it exactly like any other draft, so acceptance stays exact. It pays
+off when the output repeats the prompt or itself, which is common in code editing and structured
+output.
+
 For DFlash:
 
 ```bash
