@@ -41,6 +41,10 @@ runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefau
     resolved.execution.thinking                = options.execution.thinking;
     resolved.stop                              = std::move(options.stop);
     resolved.output                            = options.output;
+    resolved.structured_output                 = std::move(options.structured_output);
+    if (resolved.structured_output.enabled() && resolved.execution.thinking.budget) {
+        throw std::invalid_argument("structured output and a thinking budget are exclusive");
+    }
     return resolved;
 }
 

@@ -170,6 +170,24 @@ requested_reasoning_effort_name(RequestedReasoningEffort effort) noexcept {
     return {};
 }
 
+enum class ResponseFormatMode : std::uint8_t {
+    Text,
+    JsonObject,
+    JsonSchema,
+};
+
+// Wire-normalized structured-output contract. Chat Completions spells it `response_format` and the
+// Responses API spells it `text.format`; both reduce to this. The schema stays serialized at the
+// serve boundary so the Engine API never acquires a JSON-library type.
+struct ResponseFormat {
+    ResponseFormatMode mode = ResponseFormatMode::Text;
+    std::string name;
+    std::string schema_json;
+    bool strict = false;
+
+    [[nodiscard]] bool constrained() const noexcept { return mode != ResponseFormatMode::Text; }
+};
+
 struct GenerationRequest {
     std::vector<ChatTurn> messages;
     std::vector<ToolDefinition> tools;
@@ -186,6 +204,7 @@ struct GenerationRequest {
     ninfer::PromptContinuationMode continuation = ninfer::PromptContinuationMode::NewAssistantTurn;
     bool allow_engine_automatic_shared_prefixes = true;
     SamplingParams sampling;
+    ResponseFormat response_format;
 
     [[nodiscard]] bool uses_tools() const noexcept {
         return !tools.empty() && tool_choice.mode != ToolChoiceMode::None;

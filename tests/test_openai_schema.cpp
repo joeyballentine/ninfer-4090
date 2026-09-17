@@ -146,7 +146,6 @@ int test_standard_field_policy() {
     rejected("logit_bias", Json{{"12", 1}}, "logit_bias_not_supported");
     rejected("logprobs", true, "logprobs_not_supported");
     rejected("top_logprobs", 2, "logprobs_not_supported");
-    rejected("response_format", Json{{"type", "json_schema"}}, "response_format_not_supported");
     rejected("modalities", Json::array({"text", "audio"}), "modality_not_supported");
     rejected("web_search_options", Json::object(), "web_search_not_supported");
     rejected("moderation", Json::object(), "moderation_not_supported");
@@ -183,6 +182,102 @@ int test_standard_field_policy() {
     const OpenAIChatRequest zero        = parse(zero_limit);
     failures += check(zero.output_tokens_explicit && zero.generation.max_tokens == 0,
                       "an explicit zero output limit reaches Engine's no-generation path");
+    return failures;
+}
+
+Json json_schema_format(Json definition) {
+    return Json{{"type", "json_schema"}, {"json_schema", std::move(definition)}};
+}
+
+Json sample_schema() {
+    return Json{{"type", "object"},
+                {"properties", Json{{"edits", Json{{"type", "array"}}}}},
+                {"required", Json::array({"edits"})},
+                {"additionalProperties", false}};
+}
+
+int test_response_format() {
+    int failures = 0;
+
+    Json text              = base_request();
+    text["response_format"] = Json{{"type", "text"}};
+    failures += check(!parse(text).generation.response_format.constrained() &&
+                          options(parse(text).generation).structured_output.mode ==
+                              ninfer::StructuredOutputMode::None,
+                      "text response_format stays unconstrained");
+
+    Json object_body              = base_request();
+    object_body["response_format"] = Json{{"type", "json_object"}};
+#if NINFER_STRUCTURED_OUTPUT
+    const GenerationRequest object_request = parse(object_body).generation;
+    failures += check(object_request.response_format.mode == ResponseFormatMode::JsonObject,
+                      "json_object response_format parsed");
+    failures += check(options(object_request).structured_output.mode ==
+                          ninfer::StructuredOutputMode::JsonObject,
+                      "json_object response_format reaches Engine options");
+
+    Json schema_body = base_request();
+    schema_body["response_format"] =
+        json_schema_format(Json{{"name", "structured_edit"},
+                                {"strict", true},
+                                {"schema", sample_schema()}});
+    const GenerationRequest schema_request = parse(schema_body).generation;
+    failures += check(schema_request.response_format.mode == ResponseFormatMode::JsonSchema &&
+                          schema_request.response_format.name == "structured_edit" &&
+                          schema_request.response_format.strict,
+                      "json_schema response_format parsed");
+    const ninfer::StructuredOutputOptions structured = options(schema_request).structured_output;
+    failures += check(structured.mode == ninfer::StructuredOutputMode::JsonSchema &&
+                          structured.name == "structured_edit" && structured.strict &&
+                          Json::parse(structured.schema_json).at("type") == "object",
+                      "json_schema response_format reaches Engine options");
+
+    Json missing_schema              = base_request();
+    missing_schema["response_format"] = json_schema_format(Json{{"name", "no_schema"}});
+    failures += check(api_error([&] { (void)parse(missing_schema); }).param ==
+                          "response_format.json_schema.schema",
+                      "json_schema without a schema body is rejected");
+
+    Json empty_name              = base_request();
+    empty_name["response_format"] = json_schema_format(Json{{"name", ""},
+                                                            {"schema", sample_schema()}});
+    failures += check(api_error([&] { (void)parse(empty_name); }).param ==
+                          "response_format.json_schema.name",
+                      "json_schema with an empty name is rejected");
+
+    Json with_tools              = base_request();
+    with_tools["response_format"] = Json{{"type", "json_object"}};
+    with_tools["tools"]           = Json::array({Json{
+        {"type", "function"},
+        {"function", Json{{"name", "lookup"},
+                                    {"parameters", Json{{"type", "object"}}}}}}});
+    failures += check(api_error([&] { (void)parse(with_tools); }).code == "response_format_conflict",
+                      "a structured response format and tools are exclusive");
+
+    // The response is its grammar's language from the first token, so the server's default
+    // thinking budget must not open a reasoning phase in front of it.
+    ServeOptions budgeted;
+    budgeted.default_thinking_budget = 32;
+    const GenerationRequest plain    = parse(base_request()).generation;
+    failures +=
+        check(to_request_options(plain, budgeted, resolve_prompt_semantics(plain, budgeted), true)
+                  .execution.thinking.budget.value_or(0) == 32,
+              "the server default thinking budget reaches an ordinary request");
+    failures += check(!to_request_options(object_request, budgeted,
+                                          resolve_prompt_semantics(object_request, budgeted), true)
+                           .execution.thinking.budget.has_value(),
+                      "the server default thinking budget skips a structured request");
+#else
+    failures += check(api_error([&] { (void)parse(object_body); }).code ==
+                          "response_format_not_supported",
+                      "json_object is rejected without a structured-output backend");
+#endif
+
+    Json bad_type              = base_request();
+    bad_type["response_format"] = Json{{"type", "xml"}};
+    failures += check(api_error([&] { (void)parse(bad_type); }).code ==
+                          "response_format_type_invalid",
+                      "an unknown response_format type is rejected");
     return failures;
 }
 
@@ -782,6 +877,7 @@ int main() {
     int failures = 0;
     failures += test_request_envelope_and_sampling();
     failures += test_standard_field_policy();
+    failures += test_response_format();
     failures += test_constrained_decoding_extensions();
     failures += test_tools();
     failures += test_messages_and_media();

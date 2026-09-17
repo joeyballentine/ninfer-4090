@@ -1003,6 +1003,16 @@ std::string_view Tokenizer::decode_token_bytes(int id, bool skip_special_tokens)
     return skip_special_tokens && token.special ? std::string_view{} : token.bytes;
 }
 
+std::vector<std::string> Tokenizer::decoded_vocabulary() const {
+    std::vector<std::string> out;
+    out.reserve(decoded_token_bytes_.size());
+    for (std::size_t id = 0; id < decoded_token_bytes_.size(); ++id) {
+        const bool valid = id < valid_token_ids_.size() && valid_token_ids_[id];
+        out.push_back(valid ? decoded_token_bytes_[id] : std::string{});
+    }
+    return out;
+}
+
 bool Tokenizer::is_special_token(int id) const noexcept {
     return id >= 0 && static_cast<std::size_t>(id) < special_token_ids_.size() &&
            special_token_ids_[static_cast<std::size_t>(id)];

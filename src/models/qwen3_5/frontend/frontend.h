@@ -82,10 +82,14 @@ public:
                                                 bool allow_prefix_identity = true) const;
     [[nodiscard]] std::vector<TokenId> tokenize_text(std::string_view text) const;
     [[nodiscard]] MediaCacheSummary media_cache_summary() const;
+    // `structured` selects the output language. A structured session compiles the request schema
+    // against this Frontend's tokenizer and then constrains every sampling decision; an empty
+    // value leaves the session unconstrained.
     [[nodiscard]] OutputSession
     make_output_session(const PreparedPrompt& prompt, const StopPolicy& caller_stop,
-                        const OutputOptions& output            = {},
-                        const ThinkingControlOptions& thinking = {}) const;
+                        const OutputOptions& output                      = {},
+                        const ThinkingControlOptions& thinking           = {},
+                        const StructuredOutputOptions& structured        = {}) const;
     [[nodiscard]] const StopPolicy& default_stop_policy() const noexcept;
     [[nodiscard]] const ModelSamplingDefaults& sampling_defaults() const noexcept;
 

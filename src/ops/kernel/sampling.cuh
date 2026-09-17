@@ -24,12 +24,13 @@ __launch_bounds__(kSamplerBlock) __global__
     __shared__ float red_val[kSamplerBlock];
     __shared__ int red_idx[kSamplerBlock];
 
-    // With penalties disabled this remains the exact raw-logit argmax route.
+    // With penalties disabled and no grammar mask this remains the exact raw-logit argmax route.
     if (!(cfg.temperature > 0.0f)) {
-        float bv             = -CUDART_INF_F;
-        int bi               = INT_MAX;
-        const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f;
-        if (!penalties) {
+        float bv            = -CUDART_INF_F;
+        int bi              = INT_MAX;
+        const bool adjusted = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f ||
+                              cfg.token_mask != nullptr;
+        if (!adjusted) {
             for (int v = tid; v < token_domain; v += blockDim.x) {
                 const float x = __bfloat162float(logits[base + v]);
                 if (sampling_better(x, v, bv, bi)) {
@@ -117,7 +118,8 @@ __launch_bounds__(kSamplerBlock) __global__
     unsigned long long keys[kSamplerItemsPerThread];
 
     const bool greedy       = !(cfg.temperature > 0.0f);
-    const bool penalties    = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f;
+    const bool adjusted = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f ||
+                          cfg.token_mask != nullptr;
     const int cap           = greedy ? 1 : sampling_candidate_cap(cfg, token_domain);
     const std::int64_t base = static_cast<std::int64_t>(col) * physical_rows;
     const int tile_start    = partial * kSamplerPartialTileItems;
@@ -126,7 +128,7 @@ __launch_bounds__(kSamplerBlock) __global__
         const int v = tile_start + item * blockDim.x + threadIdx.x;
         if (v < token_domain) {
             const float raw = __bfloat162float(logits[base + v]);
-            const float x   = penalties ? sampling_adjusted_logit(raw, v, cfg) : raw;
+            const float x   = adjusted ? sampling_adjusted_logit(raw, v, cfg) : raw;
             keys[item]      = sampling_sort_key(x, v);
         } else {
             keys[item] = 0ull;

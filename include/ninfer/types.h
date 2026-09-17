@@ -279,10 +279,30 @@ struct OutputOptions {
     bool tolerant_tool_calls = false;
 };
 
+enum class StructuredOutputMode : std::uint8_t {
+    None,
+    JsonObject,
+    JsonSchema,
+};
+
+// Declares a token-level output language for one request. The Engine keeps the schema serialized:
+// the model frontend compiles it against its own exact tokenizer, and the Program then masks every
+// sampling decision with the resulting token set. A structured request publishes content only; the
+// grammar starts at the first generated token, so there is no reasoning phase to hide.
+struct StructuredOutputOptions {
+    StructuredOutputMode mode = StructuredOutputMode::None;
+    std::string name;
+    std::string schema_json;
+    bool strict = false;
+
+    [[nodiscard]] bool enabled() const noexcept { return mode != StructuredOutputMode::None; }
+};
+
 struct RequestOptions {
     ExecutionOptions execution;
     StopPolicy stop;
     OutputOptions output;
+    StructuredOutputOptions structured_output;
 };
 
 enum class MediaKind : std::uint8_t {
@@ -519,6 +539,8 @@ struct PromptInput {
 enum class RequestErrorKind : std::uint8_t {
     ContextLengthExceeded,
     ThinkingBudgetCapacityInsufficient,
+    // The requested output language could not be compiled against this model's tokenizer.
+    StructuredOutputInvalid,
     MediaBudgetExceeded,
     InvalidMedia,
     Overloaded,

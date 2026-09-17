@@ -637,7 +637,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
             : speculative_backend == SpeculativeBackend::DFlash ? prompt_tokens
                                                                 : 0U;
         ensure_sequence_kv_mapped(sequence, prompt_tokens, backend_materialized);
-        install_sampling(sequence, request, request_plan.sampling);
+        install_sampling(sequence, request, request_plan.sampling, request_plan.token_mask);
         sequence.rope_delta = staged.prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
 
@@ -781,8 +781,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
         }
         const std::uint32_t committed = cancelled[row] ? 0U : accepted_tokens[row];
         if ((cancelled[row] && accepted_tokens[row] != 0) ||
-            (!cancelled[row] && (committed == 0 || committed > pending.produced ||
-                                 (!terminal[row] && committed != pending.produced)))) {
+            (!cancelled[row] && (committed == 0 || committed > pending.produced))) {
             throw std::logic_error("speculative pending row has an invalid committed prefix");
         }
         const StateImageSelectors selectors = state_selectors(sequence);
@@ -790,11 +789,12 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
             ops::GdnReplayFoldRow{.source_state_slot      = selectors.source,
                                   .destination_state_slot = selectors.destination,
                                   .commit_columns         = static_cast<std::int32_t>(committed)};
-        const bool partial_terminal =
-            !cancelled[row] && terminal[row] && committed < pending.produced;
+        // Any shortened prefix, terminal or not, leaves the round's last hidden column outside the
+        // committed history, so the continuation state has to be taken from the committed one.
+        const bool partial_commit = !cancelled[row] && committed < pending.produced;
         hidden_selectors[row] =
-            static_cast<std::int32_t>(partial_terminal ? committed - 1U : pending.produced - 1U);
-        needs_hidden_correction = needs_hidden_correction || partial_terminal;
+            static_cast<std::int32_t>(partial_commit ? committed - 1U : pending.produced - 1U);
+        needs_hidden_correction = needs_hidden_correction || partial_commit;
     }
 
     const auto tail_started = Clock::now();
@@ -917,7 +917,9 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
 
             if (speculative_backend == SpeculativeBackend::Mtp) {
                 sequence.mtp_kv_valid = sequence.execution_frontier;
-                if (terminal[row]) {
+                // The round's next drafts were predicted from the full produced span. A shortened
+                // commit invalidates them, so the next round re-drafts from the committed anchor.
+                if (terminal[row] || committed < pending.produced) {
                     sequence.mtp_draft_count = 0;
                 } else {
                     const std::int32_t next  = mtp_host_egress->next_extents[row];

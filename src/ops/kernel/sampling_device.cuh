@@ -236,6 +236,13 @@ __device__ __forceinline__ int sampling_dist_offset(int col, int j) {
     return col * kSamplerCandidateCap + j;
 }
 
+// Grammar licensing: bit (v & 31) of word (v >> 5) of the mask. A null mask licenses every id.
+__device__ __forceinline__ bool sampling_token_allowed(int v, const SamplingConfig& c) {
+    return c.token_mask == nullptr ||
+           (c.token_mask[static_cast<unsigned int>(v) >> 5] &
+            (1U << (static_cast<unsigned int>(v) & 31U))) != 0U;
+}
+
 // Applies presence/frequency penalties to a raw logit. `overlay`/`overlay_len`
 // carry a round-local count overlay: tokens already committed earlier in the
 // current speculative round but not yet flushed to the global `token_counts`. For speculative
@@ -244,9 +251,12 @@ __device__ __forceinline__ int sampling_dist_offset(int col, int j) {
 // the penalty at each column sees the same prefix a per-token sampler would.
 // Non-speculative callers pass no overlay. The scan is bounded by k and
 // only runs when penalties are active, so it is free on the no-penalty path.
+// A non-null token_mask licenses a subset of the domain; every other id becomes -inf ahead of the
+// penalties, so it can be neither the argmax nor a member of the truncated support.
 __device__ __forceinline__ float sampling_adjusted_logit(float raw, int v, const SamplingConfig& c,
                                                          const std::int32_t* overlay = nullptr,
                                                          int overlay_len             = 0) {
+    if (!sampling_token_allowed(v, c)) { return -CUDART_INF_F; }
     float x = raw;
     if (c.presence_penalty == 0.0f && c.frequency_penalty == 0.0f) { return x; }
     int cnt = c.token_counts != nullptr ? c.token_counts[v] : 0;
@@ -317,6 +327,10 @@ __device__ inline void sampling_normalize_support(const SamplingConfig& cfg, flo
         float cum                = 0.0f;
         int support              = 0;
         for (int j = 0; j < n; ++j) {
+            // Masked ids and unfilled candidate slots carry -inf and therefore zero weight. They
+            // cannot be drawn, and leaving them in the support would let inverse-CDF rounding fall
+            // through to one of them. Finite candidates keep their existing treatment exactly.
+            if (cand_val[j] == -CUDART_INF_F) { break; }
             if (min_p_thresh >= 0.0f && prob[j] < min_p_thresh) { break; }
             cum += prob[j];
             support = j + 1;

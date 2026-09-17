@@ -315,7 +315,23 @@ ninfer::RequestOptions to_request_options(const GenerationRequest& request,
     ninfer::RequestOptions options;
     options.execution.requested_output_tokens = static_cast<std::uint32_t>(request.max_tokens);
     options.execution.allow_prefix_reuse      = allow_prefix_reuse;
-    if (semantics.enable_thinking != false) {
+    switch (request.response_format.mode) {
+    case ResponseFormatMode::Text:
+        break;
+    case ResponseFormatMode::JsonObject:
+        options.structured_output.mode = ninfer::StructuredOutputMode::JsonObject;
+        break;
+    case ResponseFormatMode::JsonSchema:
+        options.structured_output.mode        = ninfer::StructuredOutputMode::JsonSchema;
+        options.structured_output.name        = request.response_format.name;
+        options.structured_output.schema_json = request.response_format.schema_json;
+        options.structured_output.strict      = request.response_format.strict;
+        break;
+    }
+    // A structured response is the grammar's language from its first token, so it has no thinking
+    // phase to budget. The request contract rejects the combination rather than silently dropping
+    // a caller-set budget, so the server default must not create one here.
+    if (semantics.enable_thinking != false && !request.response_format.constrained()) {
         options.execution.thinking.budget =
             request.thinking_budget ? request.thinking_budget : server.default_thinking_budget;
     }

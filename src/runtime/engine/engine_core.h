@@ -199,8 +199,18 @@ public:
 
         std::shared_ptr<Request> request;
         try {
-            auto output = instance_.frontend.make_output_session(
-                prompt, options.stop, options.output, options.execution.thinking);
+            auto output = [&] {
+                try {
+                    return instance_.frontend.make_output_session(
+                        prompt, options.stop, options.output, options.execution.thinking,
+                        options.structured_output);
+                } catch (const std::invalid_argument& error) {
+                    // Only a structured request can fail here for a caller-supplied reason: the
+                    // schema does not compile against this model's tokenizer.
+                    if (!options.structured_output.enabled()) { throw; }
+                    throw RequestError(RequestErrorKind::StructuredOutputInvalid, error.what());
+                }
+            }();
             const std::uint32_t capacity_output =
                 max_context_ - prompt_summary.prompt_tokens + static_cast<std::uint32_t>(1);
             try {
@@ -1112,8 +1122,9 @@ private:
                 }
                 const OutputDecision decision = request->output.preview_model(
                     row_tokens, request->budget->remaining(), request->budget->limit_reason());
+                // A structured request may license a shorter prefix than the speculative round
+                // produced without finishing: the grammar rejected a verified draft token.
                 if (decision.accepted_tokens == 0 || decision.accepted_tokens > count ||
-                    (!decision.finished() && decision.accepted_tokens != count) ||
                     (decision.finished() && decision.continuation != ContinuationAction::Decode) ||
                     (decision.prefix_execution_split_after &&
                      (*decision.prefix_execution_split_after == 0 ||
@@ -1226,6 +1237,14 @@ private:
                 auto published = request->output.commit_preview();
                 auto timing    = record_committed_output(request, accepted);
                 append_output(request, std::move(published), std::move(timing));
+                if (!cancelled[row] && !decisions[row].terminal &&
+                    request->output.has_token_constraint()) {
+                    if (!request->sequence) {
+                        throw std::logic_error("constrained request has no active sequence");
+                    }
+                    instance_.program->set_token_mask(*request->sequence,
+                                                      request->output.next_token_bitmask());
+                }
                 if (decisions[row].terminal) {
                     if (cancelled[row]) {
                         terminal_requests[terminal_count] = request;
@@ -1424,6 +1443,12 @@ private:
 
     void ensure_base_plan(const std::shared_ptr<Request>& request) {
         if (!request->base_plan) {
+            if (request->output.has_token_constraint()) {
+                // The grammar's root mask travels with the plan so the token sampled at the end of
+                // prefill is already constrained; every later round refreshes it after commit.
+                const auto mask = request->output.next_token_bitmask();
+                request->options.execution.token_mask.assign(mask.begin(), mask.end());
+            }
             request->base_plan.emplace(
                 instance_.program->plan_request(request->prompt, request->options.execution));
         }

@@ -1,5 +1,6 @@
 #pragma once
 #include "ninfer/types.h"
+#include "models/qwen3_5/frontend/grammar.h"
 #include "runtime/contract/request.h"
 #include <array>
 #include <cstddef>
@@ -79,12 +80,18 @@ public:
     [[nodiscard]] ThinkingBudgetStats thinking_stats() const noexcept;
     [[nodiscard]] std::optional<std::string> matched_stop_string() const;
 
+    // Structured output. The session owns the grammar position; Engine transports the mask it
+    // publishes into the Program before the next sampling round.
+    [[nodiscard]] bool has_token_constraint() const noexcept;
+    [[nodiscard]] std::span<const std::uint32_t> next_token_bitmask();
+
 private:
     class Impl;
     OutputSession(std::shared_ptr<const frontend::Tokenizer> tokenizer, StopPolicy policy,
                   OutputOptions output, bool starts_in_reasoning, ThinkingControlOptions thinking,
                   std::shared_ptr<const std::vector<TokenId>> thinking_control_tokens,
-                  std::shared_ptr<const frontend::ToolCallOutputContract> tool_call_output);
+                  std::shared_ptr<const frontend::ToolCallOutputContract> tool_call_output,
+                  std::optional<frontend::TokenGrammar> grammar);
     std::unique_ptr<Impl> impl_;
 
     friend class Frontend;

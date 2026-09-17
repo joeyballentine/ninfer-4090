@@ -914,6 +914,10 @@ public:
     [[nodiscard]] PendingBatch decode(std::span<const SequenceHandle> sequences,
                                       std::span<const runtime::RoundBudget> budgets,
                                       runtime::ExecutionTiming* failed_timing = nullptr);
+    // Replaces the structured-output token mask this sequence samples under. The mask is the
+    // caller's grammar state after its last committed token; it takes effect on the next sampling
+    // round and must have ceil(vocab/32) words.
+    void set_token_mask(SequenceHandle sequence, std::span<const std::uint32_t> mask);
     // Advance each live sequence with its exact target-owned token row. This does not sample or
     // advance sampler RNG/occurrence state; callers own output publication and budget accounting.
     // Each optional execution split is relative to its row's forced-token span.

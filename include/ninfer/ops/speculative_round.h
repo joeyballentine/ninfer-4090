@@ -79,6 +79,11 @@ void speculative_prepare_verify_ids(const Tensor& anchors, const Tensor& drafts,
  *
  * Numeric:
  *   Sampling filtering, penalties, normalization, and RNG semantics are those of sampling.h.
+ *   A non-null configs[b].token_mask applies to verification column 0 only: that column is the one
+ *   whose language state the caller knows before the round. Columns 1..K are evaluated with no
+ *   mask, so the caller must license the committed prefix itself and may commit fewer tokens than
+ *   the Op produced. A masked row never takes the raw target_tokens fast path, because those
+ *   target ids were selected without the mask.
  *
  * Effects:
  *   For each row, let A be the accepted draft count and L=A+1. licensed_tokens[0:A,b] receives
@@ -133,7 +138,8 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  *   proposal_q is consumed directly; it is not reconstructed from selector scores or expanded to
  *   a dense vocabulary distribution. Target logits are interpreted through sampling.h. Column i's
  *   penalty overlay is drafts[0..i-1], because the column is consumed only after that prefix was
- *   accepted. RNG purposes are the existing speculative accept/correction/bonus domains and use
+ *   accepted. A non-null configs[b].token_mask applies to column 0 only, with the same caller
+ *   obligation as speculative_accept_greedy_drafts. RNG purposes are the existing speculative accept/correction/bonus domains and use
  *   logical positions derived from the old round length.
  *
  * Effects:
@@ -146,8 +152,9 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  *   inputs remain unchanged.
  *
  * Execution:
- *   all_rows_greedy_without_penalties=true promises the matching device configs and enables the
- *   raw target_tokens route. A false flag selects the general route and supports mixed rows.
+ *   all_rows_greedy_without_penalties=true promises the matching device configs, which also means
+ *   no row carries a token mask, and enables the raw target_tokens route. A false flag selects the
+ *   general route and supports mixed rows.
  *
  * Workspace:
  *   Caller-owned transient storage reported by

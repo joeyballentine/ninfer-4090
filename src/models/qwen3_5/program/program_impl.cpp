@@ -240,6 +240,9 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     if (plan.persistent.token_counts) {
         token_counts = plan.persistent.token_counts->bind(backing);
     }
+    if (plan.persistent.token_masks) {
+        token_masks = plan.persistent.token_masks->bind(backing);
+    }
     if (plan.persistent.sampling_config) {
         sampling_config = plan.persistent.sampling_config->bind(backing);
     }

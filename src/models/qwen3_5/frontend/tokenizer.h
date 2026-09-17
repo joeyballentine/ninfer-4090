@@ -158,6 +158,9 @@ public:
     [[nodiscard]] bool is_special_token(int id) const noexcept;
     [[nodiscard]] bool is_valid_token(int id) const noexcept;
     [[nodiscard]] bool has_exact_token_domain(std::size_t size) const noexcept;
+    // Decoded bytes of every id in [0,vocab_size()), with an empty entry for an unused id. This is
+    // the vocabulary a grammar compiler needs to relate token ids to the byte language it matches.
+    [[nodiscard]] std::vector<std::string> decoded_vocabulary() const;
 
 private:
     // The earliest added-token match at or after `pos`, mirroring encode_with_boundaries:

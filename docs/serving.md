@@ -175,7 +175,8 @@ The endpoint supports:
 - `temperature`, `top_p`, presence/frequency penalties, and signed integer `seed`;
 - the compatible `top_k` (`0..20`) and `min_p` (`0..1`) sampler extensions;
 - up to four non-empty stop strings, applied to both reasoning and answer output;
-- `n:1`, text-only `modalities`, and `response_format: {"type":"text"}`;
+- `n:1`, text-only `modalities`, and `response_format` `{"type":"text"}`, `{"type":"json_object"}`,
+  or `{"type":"json_schema","json_schema":{"name":…,"schema":…,"strict":…}}`;
 - non-streaming responses and server-sent event streams;
 - `stream_options.include_usage`;
 - llama.cpp-compatible terminal `timings`, plus opt-in `timings_per_token` and
@@ -188,15 +189,27 @@ The endpoint supports:
   `chat_template_kwargs`;
 - Assistant `reasoning_content` and `reasoning` history aliases.
 
+A `json_object` or `json_schema` response format is enforced, not requested: the schema is compiled
+into a token-level grammar over the loaded tokenizer, and every sampling decision is masked to the
+ids that grammar licenses. The returned `content` is therefore valid JSON, and schema-conformant
+when a schema is given. Enforcement applies to the whole response, so a structured request has no
+reasoning phase, the server's default thinking budget does not apply to it, and it cannot be
+combined with `tools`; that combination is rejected with `response_format_conflict`.
+`strict` reaches the schema compiler: `true` closes
+objects and arrays, so the grammar admits no property or item the schema does not declare. A schema
+the compiler cannot accept is HTTP 400 `response_format_invalid`. A build configured with
+`-DNINFER_ENABLE_STRUCTURED_OUTPUT=OFF` has no grammar backend and rejects every non-text format
+with `response_format_not_supported`.
+
 Options whose observable behavior the Engine cannot provide are rejected when they request that
-behavior. This includes JSON constrained output, nonzero `logit_bias`, requested log probabilities,
+behavior. This includes nonzero `logit_bias`, requested log probabilities,
 audio/file input or audio output, `strict:true`, required or named tool choice,
 `parallel_tool_calls:false` with enabled tools, explicit low/high image detail, web search,
 moderation, low/high verbosity, stored Chat Completions, and non-empty legacy `functions`.
 Each capability rejection identifies the affected field and the guarantee NInfer cannot provide.
-Known constrained-decoding aliases (`grammar`, `structured_outputs`, `guided_json`, `guided_regex`,
-`guided_choice`, and `guided_grammar`) receive the same explicit rejection instead of being treated
-as unknown hints.
+Vendor-specific constrained-decoding aliases (`grammar`, `structured_outputs`, `guided_json`,
+`guided_regex`, `guided_choice`, and `guided_grammar`) remain rejected: the enforced contract is
+`response_format` only.
 
 Semantically neutral fields do not make an otherwise executable request fail. All-zero
 `logit_bias`, `logprobs:false`, `top_logprobs:0`, `verbosity:"medium"`, empty legacy tool controls,
@@ -478,7 +491,7 @@ wire response contains typed `output` Items.
 | `reasoning.effort` | `none` requests disabled thinking; other standard effort values pass to the selected template |
 | `chat_template_kwargs` | template parameters as a JSON object; standard options merge with typed fields |
 | `preserve_thinking` | alias for `chat_template_kwargs.preserve_thinking`; conflicting values are rejected |
-| `text.format` | omitted or `{"type":"text"}` only |
+| `text.format` | `{"type":"text"}`, `{"type":"json_object"}`, or `{"type":"json_schema","name":…,"schema":…,"strict":…}`; the last two are enforced by grammar-constrained decoding and cannot be combined with `tools` |
 | `tools` | direct function definitions or namespace groups containing function definitions; see below |
 | `tool_choice` | `auto`, `none`, or function-only `allowed_tools` with mode `auto`; a namespaced selection carries both `namespace` and `name` |
 | `parallel_tool_calls` | `true` by default; `false` is accepted only when no effective tool is callable |
@@ -578,9 +591,9 @@ undeclared model output remains ordinary text. `allowed_tools` with mode `auto` 
 without changing declaration order, while `tool_choice:"none"` disables structured tool output even
 when the history contains earlier calls.
 
-NInfer does not execute functions or enforce JSON Schema through constrained decoding, so
-`strict:true`, required or named tool choice, hosted tools, remote MCP tools, and custom free-form
-tools are rejected. Deferred loading, output schemas, and caller restrictions that exclude direct
+NInfer does not execute functions, and the grammar-constrained sampler is reserved for
+`response_format`: a tool schema is not enforced during decoding. So `strict:true`, required or
+named tool choice, hosted tools, remote MCP tools, and custom free-form tools are rejected. Deferred loading, output schemas, and caller restrictions that exclude direct
 invocation are also rejected because their semantics cannot be honored.
 
 ### Response object and usage
@@ -700,10 +713,13 @@ curl http://127.0.0.1:8080/v1/responses/input_tokens \
 {"object":"response.input_tokens","input_tokens":11}
 ```
 
+`text.format` carries the same enforced structured output as Chat Completions `response_format`;
+see that section for what enforcement covers and which combinations are rejected.
+
 Unsupported Create fields include Conversations, prompt templates, context management, hosted
-moderation, Structured Outputs/JSON mode, non-empty `include`, background execution, compaction,
-files/audio, and OpenAI-hosted/MCP/custom tools. These are compatibility boundaries, not silently
-accepted placeholders.
+moderation, non-empty `include`, background execution, compaction, files/audio, and
+OpenAI-hosted/MCP/custom tools. These are compatibility boundaries, not silently accepted
+placeholders.
 
 ## Anthropic Messages
 

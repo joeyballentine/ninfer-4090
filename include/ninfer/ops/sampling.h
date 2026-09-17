@@ -22,6 +22,8 @@ enum SamplePurpose : std::int32_t {
 
 // Device-resident sampling parameters. token_counts is an optional device I32
 // [token_domain] committed generated-token occurrence-count array used by both penalties.
+// token_mask is an optional device ceil(token_domain/32)-word bitset: bit (v & 31) of word
+// (v >> 5) licenses vocabulary id v. A null mask licenses the whole domain.
 struct SamplingConfig {
     float temperature          = 0.0f; // <= 0 => greedy argmax (bit-identical to argmax())
     std::int32_t top_k         = 20;   // runtime contract is [1,20]; Op defensively caps otherwise
@@ -30,7 +32,8 @@ struct SamplingConfig {
     float presence_penalty     = 0.0f;
     float frequency_penalty    = 0.0f;
     unsigned long long seed    = 0;
-    std::int32_t* token_counts = nullptr; // device [token_domain] i32, or null
+    std::int32_t* token_counts      = nullptr; // device [token_domain] i32, or null
+    const std::uint32_t* token_mask = nullptr; // device ceil(token_domain/32) bitset, or null
 };
 
 // Caller-owned transient capacity for every parallel sampling-lane count in the inclusive
@@ -52,9 +55,15 @@ struct SamplingConfig {
  * With either greedy or positive-temperature sampling, let
  * c_v=configs[b].token_counts[v] (or zero when the pointer is null):
  *
- *   adjusted_v = float(logits[v,b])
+ *   adjusted_v = -inf                                        when configs[b].token_mask is
+ *                                                            non-null and bit v is clear,
+ *                float(logits[v,b])
  *                - configs[b].presence_penalty * (c_v > 0)
- *                - configs[b].frequency_penalty * c_v.
+ *                - configs[b].frequency_penalty * c_v        otherwise.
+ *
+ * A masked id therefore cannot be the greedy argmax, and it carries zero weight in the truncated
+ * stochastic support, so the drawn id is always licensed whenever the mask licenses at least one
+ * id in [0,token_domain).
  *
  * A greedy row selects min argmax_v adjusted_v and skips filters and RNG. Candidates for a
  * positive-temperature row are sorted by adjusted_v descending with lower token id breaking
