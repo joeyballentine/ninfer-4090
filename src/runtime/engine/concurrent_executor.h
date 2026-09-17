@@ -2,6 +2,7 @@
 
 // Small fixed-capacity request scheduling and batched decode execution for every backend.
 
+#include "core/device.h"
 #include "core/disk_state_cache.h"
 #include "ninfer/types.h"
 #include "runtime/contract/types.h"
@@ -19,6 +20,7 @@
 #include <cstdint>
 #include <deque>
 #include <exception>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -42,8 +44,9 @@ public:
     using Plan     = typename Package::RequestPlan;
     using Clock    = std::chrono::steady_clock;
 
-    ConcurrentExecutor(Instance& instance, const EngineOptions& options)
-        : instance_(instance), max_concurrency_(options.max_concurrency),
+    ConcurrentExecutor(Instance& instance, const DeviceContext& device,
+                       const EngineOptions& options)
+        : instance_(instance), device_(device), max_concurrency_(options.max_concurrency),
           max_outstanding_(static_cast<std::size_t>(options.max_concurrency) +
                            options.max_pending_requests),
           pending_timeout_(std::chrono::milliseconds(options.pending_timeout_ms)),
@@ -68,7 +71,26 @@ public:
         disk_config.enabled         = options.enable_prompt_cache;
         disk_cache_                 = std::make_unique<DiskStateCache>(std::move(disk_config));
         instance_.program->set_disk_state_cache(disk_cache_.get());
-        worker_ = std::thread([this] { worker_loop(); });
+        // The worker thread owns every CUDA call after construction. Bind the Engine's device
+        // on it before any work is scheduled so a non-default --device is honored there too.
+        std::promise<void> startup;
+        std::future<void> started = startup.get_future();
+        worker_                   = std::thread([this, startup = std::move(startup)]() mutable {
+            try {
+                device_.bind_to_current_thread();
+                startup.set_value();
+            } catch (...) {
+                startup.set_exception(std::current_exception());
+                return;
+            }
+            worker_loop();
+        });
+        try {
+            started.get();
+        } catch (...) {
+            if (worker_.joinable()) { worker_.join(); }
+            throw;
+        }
     }
 
     ~ConcurrentExecutor() noexcept {
@@ -1229,6 +1251,7 @@ private:
     }
 
     Instance& instance_;
+    const DeviceContext& device_;
     const std::uint32_t max_concurrency_;
     const std::size_t max_outstanding_;
     const std::chrono::milliseconds pending_timeout_;

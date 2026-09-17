@@ -42,6 +42,10 @@ struct DeviceContext {
     DeviceContext(DeviceContext&& other) noexcept;
     DeviceContext& operator=(DeviceContext&& other) noexcept;
 
+    // Make this context's device current on the calling thread. CUDA device selection is
+    // thread-local, so every thread that issues work for this context binds once before use.
+    void bind_to_current_thread() const;
+    void bind_to_current_thread_noexcept() const noexcept;
     int sm() const noexcept;
     std::size_t total_vram() const noexcept;
     void synchronize() const;
