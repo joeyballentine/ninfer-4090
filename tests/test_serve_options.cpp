@@ -54,9 +54,15 @@ int main() {
             !defaults.sampling_overrides.top_k && !defaults.sampling_overrides.presence_penalty &&
             !defaults.sampling_overrides.frequency_penalty,
         "server defaults unexpectedly override registered model sampling");
-    failures += check(defaults.enable_ui, "WebUI is unexpectedly disabled by default");
+    failures += check(!defaults.wddm_evictable_budget,
+                      "wddm_evictable_budget is unexpectedly enabled by default");
     failures += check(resolve_public_model_id(defaults, "artifact-model") == "artifact-model",
                       "artifact model id was not selected by default");
+
+    const ServeOptions wddm_opt_in =
+        parse({"ninfer-serve", "model.ninfer", "--wddm-evictable-budget"});
+    failures += check(wddm_opt_in.wddm_evictable_budget,
+                      "--wddm-evictable-budget was not parsed correctly");
 
     const ServeOptions ui_disabled =
         parse({"ninfer-serve", "model.ninfer", "--no-ui"});
@@ -266,11 +272,21 @@ int main() {
         check(serve_usage_text("ninfer-serve").find("identity.model_id") != std::string::npos,
               "serve help omits the artifact-derived model id default");
 
+    failures += check(defaults.default_max_tokens == static_cast<int>(defaults.max_context),
+                      "default_max_tokens did not default to max_context");
+
     const ServeOptions inherited =
         parse({"ninfer-serve", "model.ninfer", "--max-context", "16384"});
     failures += check(inherited.kv_capacity.mode == ninfer::KvCapacityMode::Explicit &&
                           inherited.kv_capacity.explicit_tokens == 16384,
                       "omitted --kv-capacity did not follow --max-context");
+    failures += check(inherited.default_max_tokens == 16384,
+                      "omitted --default-max-tokens did not follow --max-context");
+
+    const ServeOptions explicit_max_tokens =
+        parse({"ninfer-serve", "model.ninfer", "--max-context", "16384", "--default-max-tokens", "2048"});
+    failures += check(explicit_max_tokens.default_max_tokens == 2048,
+                      "explicit --default-max-tokens was overridden by --max-context");
 
     const ServeOptions automatic = parse({"ninfer-serve", "model.ninfer", "--kv-capacity", "auto"});
     failures += check(automatic.kv_capacity.mode == ninfer::KvCapacityMode::Automatic &&

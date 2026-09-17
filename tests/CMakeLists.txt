@@ -95,6 +95,9 @@ ninfer_add_test(ninfer_gdn_replay_records_test
 ninfer_add_test(ninfer_disk_state_cache_test
   SOURCES test_disk_state_cache.cpp
   LIBRARIES ninfer_core ninfer_ops)
+ninfer_add_test(ninfer_chunked_kv_snapshot_restore_test
+  SOURCES test_chunked_kv_snapshot_restore.cpp
+  LIBRARIES ninfer_core ninfer_ops)
 set_tests_properties(
   ninfer_artifact_materialization_test
   ninfer_device_test
@@ -103,6 +106,7 @@ set_tests_properties(
   ninfer_request_memory_test
   ninfer_kv_cache_test
   ninfer_state_store_test
+  ninfer_chunked_kv_snapshot_restore_test
   PROPERTIES SKIP_RETURN_CODE 77)
 # Family frontend and one opt-in real-artifact prefix/MTP integration test.
 ninfer_add_test(ninfer_qwen3_6_frontend_test
@@ -128,7 +132,7 @@ ninfer_add_test(ninfer_qwen3_6_27b_load_plan_test
 target_include_directories(ninfer_qwen3_6_27b_load_plan_test PRIVATE
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b/export)
-target_link_libraries(ninfer_qwen3_6_27b_load_plan_test PRIVATE CUDA::cudart)
+target_link_libraries(ninfer_qwen3_6_27b_load_plan_test PRIVATE ${NINFER_CUDART_TARGET})
 set_tests_properties(ninfer_qwen3_6_27b_load_plan_test PROPERTIES SKIP_RETURN_CODE 77)
 ninfer_add_test(ninfer_qwen3_6_35b_a3b_real_test
   SOURCES targets/qwen3_6_35b_a3b/test_engine_real.cpp
@@ -145,7 +149,7 @@ ninfer_add_test(ninfer_qwen3_6_35b_a3b_dflash_load_plan_test
 target_include_directories(ninfer_qwen3_6_35b_a3b_dflash_load_plan_test PRIVATE
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_35b_a3b/export)
-target_link_libraries(ninfer_qwen3_6_35b_a3b_dflash_load_plan_test PRIVATE CUDA::cudart)
+target_link_libraries(ninfer_qwen3_6_35b_a3b_dflash_load_plan_test PRIVATE ${NINFER_CUDART_TARGET})
 set_tests_properties(ninfer_qwen3_6_35b_a3b_dflash_load_plan_test
   PROPERTIES SKIP_RETURN_CODE 77)
 
@@ -248,8 +252,6 @@ ninfer_add_linear_test(ninfer_linear_q4_a16_test ops/linear/test_q4_a16.cpp)
 ninfer_add_linear_test(ninfer_linear_q5_a16_test ops/linear/test_q5_a16.cpp)
 ninfer_add_linear_test(ninfer_linear_q6_a16_test ops/linear/test_q6_a16.cpp)
 ninfer_add_linear_test(ninfer_linear_w8_a16_test ops/linear/test_w8_a16.cpp)
-ninfer_add_linear_test(ninfer_linear_nvfp4_a16_test ops/linear/test_nvfp4_a16.cpp)
-ninfer_add_linear_test(ninfer_linear_nvfp4_a4_test ops/linear/test_nvfp4_a4.cpp)
 ninfer_add_op_test(ninfer_linear_bf16_a16_test
   SOURCES ops/linear/test_bf16_a16.cpp
   LIBRARIES ninfer_ops)
@@ -283,9 +285,6 @@ ninfer_add_fused_linear_test(
   ninfer_linear_add_w8_a16_test
   ops/linear_add/test_w8_a16.cpp
   ops/linear_add/linear_add_test_common.cpp)
-ninfer_add_op_test(ninfer_linear_add_nvfp4_test
-  SOURCES ops/linear_add/test_nvfp4.cpp
-  LIBRARIES ninfer_ops)
 ninfer_add_fused_linear_test(
   ninfer_linear_pair_w8_a16_test
   ops/linear_pair/test_w8_a16.cpp
@@ -297,10 +296,6 @@ ninfer_add_fused_linear_test(
 ninfer_add_fused_linear_test(
   ninfer_linear_swiglu_w8_a16_test
   ops/linear_swiglu/test_w8_a16.cpp
-  ops/linear_swiglu/linear_swiglu_test_common.cpp)
-ninfer_add_fused_linear_test(
-  ninfer_linear_swiglu_nvfp4_test
-  ops/linear_swiglu/test_nvfp4.cpp
   ops/linear_swiglu/linear_swiglu_test_common.cpp)
 
 ninfer_add_test(ninfer_qwen3_6_27b_visual_scatter_test
@@ -316,7 +311,7 @@ target_include_directories(ninfer_test_e8_codec PRIVATE
   ${PROJECT_SOURCE_DIR}/tools/test_kv
   ${PROJECT_SOURCE_DIR}/src/ops/kernel
   ${PROJECT_SOURCE_DIR}/include)
-target_link_libraries(ninfer_test_e8_codec PRIVATE CUDA::cudart)
+target_link_libraries(ninfer_test_e8_codec PRIVATE ${NINFER_CUDART_TARGET})
 set_target_properties(ninfer_test_e8_codec PROPERTIES CUDA_ARCHITECTURES "89")
 add_test(NAME ninfer_test_e8_codec COMMAND ninfer_test_e8_codec)
 set_tests_properties(ninfer_test_e8_codec PROPERTIES SKIP_RETURN_CODE 77)

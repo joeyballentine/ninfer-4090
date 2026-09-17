@@ -51,12 +51,13 @@ std::int32_t gqa_small_t_split_count(std::int32_t window, std::int32_t tokens, D
     if (kv_dtype == DType::I8 && tokens == 6 && window > 128 && window <= 160) {
         return div_up(window, 24 / Geometry::DecodeSplitScale);
     }
-    // Bc=64 is one CTA/SM on these model shapes. Keep the 8K grid at or below
-    // one 170-SM wave after accounting for the geometry's KV-head count.
-    if (kv_dtype == DType::I8 && tokens == 6 && window > 5000 && window <= 8198) {
+    // Bc=64 is one CTA/SM on these model shapes and the grid is (KVHeads, splits, batch), so
+    // keep the 8K grid at or below one wave of the build's target device. This mirrors
+    // gqa_small_t_active_splits() exactly and therefore reads the same compile-time SM count.
+    if (kv_dtype == DType::I8 && tokens >= 1 && tokens <= 6 && window > 4096 && window <= 8198) {
         const std::int32_t splits   = div_up(window, 192 / Geometry::DecodeSplitScale);
         constexpr std::int32_t kMin = 4 * Geometry::DecodeSplitScale;
-        constexpr std::int32_t kMax = 42 * Geometry::DecodeSplitScale;
+        constexpr std::int32_t kMax = kTargetSmCount / Geometry::KVHeads;
         const std::int32_t clamped  = (splits > kMin) ? splits : kMin;
         return (clamped < kMax) ? clamped : kMax;
     }
@@ -155,45 +156,51 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                 logical_capacity, scale, static_cast<__nv_bfloat16*>(partial_acc.data),
                 static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
     };
-    if constexpr (TokenTile == 6) {
-        // Small grids need more warps per CTA. From 2K to 8K, Bc=64 halves key
-        // loop iterations; dynamic smem avoids penalizing the long-context path.
-        if (implementation_window > 128 && implementation_window <= 160) {
-            launch.template operator()<24, 1, 32, false>();
-        } else if (implementation_window <= 2054) {
-            launch.template operator()<12, 1, 32, false>();
-        } else if (implementation_window <= 8198) {
-            launch.template operator()<12, 1, 64, true>();
+    if constexpr (TokenTile >= 7) {
+        if constexpr (Geometry::GroupSize == 6) {
+            // Three Q row tiles for the 27B group of six (RowTiles = 3 -> Wc = 6).
+            launch.template operator()<6, 1, 32, true>();
         } else {
-            launch.template operator()<6, 2, 32, false>();
+            // Four Q row tiles for the 35B group of eight (RowTiles = 4 -> Wc = 8).
+            launch.template operator()<8, 1, 32, true>();
+        }
+    } else if constexpr (TokenTile == 6) {
+        // Three Q row tiles for the 27B group of six (RowTiles = 3).
+        if (implementation_window > 128 && implementation_window <= 160) {
+            launch.template operator()<6, 1, 32, false>();
+        } else if (implementation_window <= 2054) {
+            launch.template operator()<6, 1, 32, false>();
+        } else if (implementation_window <= 8198) {
+            launch.template operator()<6, 1, 64, true>();
+        } else {
+            launch.template operator()<6, 1, 32, false>();
         }
     } else if constexpr (TokenTile == 5) {
         if constexpr (Geometry::GroupSize == 6) {
-            // Two Q row tiles for the 27B group of six.
+            // Two Q row tiles for the 27B group of six (RowTiles = 2).
             if (implementation_window > 128 && implementation_window <= 512) {
-                launch.template operator()<32, 1, 32, false>();
+                launch.template operator()<8, 2, 32, false>();
             } else if (implementation_window <= 1029) {
-                launch.template operator()<16, 1, 32, false>();
+                launch.template operator()<8, 2, 32, false>();
             } else {
                 launch.template operator()<8, 2, 32, false>();
             }
         } else {
-            // Three Q row tiles for the 35B group of eight. The 24/12-warp
-            // routes retain eight/four consumer warps per tile; the 6-warp
-            // route is reserved for long windows where CTA residency wins.
+            // Three Q row tiles for the 35B group of eight (RowTiles = 3).
             if (implementation_window > 128 && implementation_window <= 512) {
-                launch.template operator()<24, 1, 32, false>();
+                launch.template operator()<6, 1, 32, false>();
             } else if (implementation_window <= 1029) {
-                launch.template operator()<24, 1, 32, false>();
+                launch.template operator()<6, 1, 32, false>();
             } else if (implementation_window <= 4096) {
-                launch.template operator()<12, 1, 32, false>();
+                launch.template operator()<6, 1, 32, false>();
             } else {
-                launch.template operator()<6, 2, 32, false>();
+                launch.template operator()<6, 1, 32, false>();
             }
         }
     } else if constexpr (TokenTile == 4) {
+        // Two Q row tiles (RowTiles = 2).
         if (implementation_window <= 1029) {
-            launch.template operator()<16, 1, 32, false>();
+            launch.template operator()<8, 2, 32, false>();
         } else {
             launch.template operator()<8, 2, 32, false>();
         }
@@ -225,11 +232,11 @@ PagedKVBatchLayerView single_row_batch_view(const PagedKVLayerView& cache) {
 
 } // namespace
 
-bool gqa_attention_uses_small_t(std::int32_t tokens) { return tokens >= 1 && tokens <= 6; }
+bool gqa_attention_uses_small_t(std::int32_t tokens) { return tokens >= 1 && tokens <= 8; }
 
 std::int32_t gqa_attention_split_capacity(std::int32_t q_heads, std::int32_t tokens,
                                           DType cache_dtype, GqaExecutionEnvelope envelope) {
-    if (tokens < 1 || tokens > 6 || (cache_dtype != DType::BF16 && cache_dtype != DType::I8) ||
+    if (tokens < 1 || tokens > 8 || (cache_dtype != DType::BF16 && cache_dtype != DType::I8) ||
         envelope.min_visible_keys == 0 || envelope.min_visible_keys > envelope.max_visible_keys) {
         throw std::invalid_argument("gqa_attention split capacity: invalid profile");
     }
@@ -325,6 +332,12 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
         break;
     case 6:
         NINFER_GQA_SMALL_T_DISPATCH(6, 4);
+        break;
+    case 7:
+        NINFER_GQA_SMALL_T_DISPATCH(7, 4);
+        break;
+    case 8:
+        NINFER_GQA_SMALL_T_DISPATCH(8, 4);
         break;
     default:
         throw std::invalid_argument("gqa_attention_small_t_launch: unsupported T");

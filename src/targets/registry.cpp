@@ -3,11 +3,13 @@
 #include "artifact/binder.h"
 #include "artifact/materializer.h"
 #include "artifact/reader.h"
+#include "core/arena.h"
 #include "core/device.h"
 #include "runtime/engine/kv_capacity.h"
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -39,13 +41,7 @@ void validate_options(const EngineOptions& options) {
         }
         break;
     case KvCapacityMode::Automatic:
-        if (options.kv_capacity.explicit_tokens != 0) {
-            throw std::invalid_argument(
-                "Engine automatic kv_capacity must not carry explicit tokens");
-        }
         break;
-    default:
-        throw std::invalid_argument("Engine kv_capacity mode is invalid");
     }
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
         throw std::invalid_argument("Engine max_concurrency must be in [1,8]");
@@ -59,14 +55,18 @@ artifact::LoadProgress artifact_progress(const LoadProgress& progress) {
     return artifact::LoadProgress{.callback = progress.callback};
 }
 
-std::size_t runtime_bytes_after_planned_weights(std::uint64_t weight_bytes) {
+std::size_t runtime_bytes_after_planned_weights(std::uint64_t weight_bytes,
+                                                bool wddm_evictable_budget = false) {
     std::size_t free_bytes  = 0;
     std::size_t total_bytes = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
 #if defined(_WIN32)
-    // Allow WDDM to evict background apps down to a 512 MiB non-evictable DWM display floor
+    // Allow WDDM to evict background apps down to a 512 MiB non-evictable DWM display floor.
+    // Opt-in only: on a card that is also driving the desktop the background allocations are
+    // frequently not evictable, so budgeting against total VRAM oversubscribes the device and
+    // pushes the runtime into WDDM paging.
     constexpr std::size_t kMinDwmHeadroom = 512ULL * 1024ULL * 1024ULL;
-    if (total_bytes > weight_bytes + kMinDwmHeadroom) {
+    if (wddm_evictable_budget && total_bytes > weight_bytes + kMinDwmHeadroom) {
         const std::size_t evictable_capacity =
             total_bytes - static_cast<std::size_t>(weight_bytes) - kMinDwmHeadroom;
         const std::size_t free_after_weights =
@@ -83,18 +83,25 @@ std::size_t runtime_bytes_after_planned_weights(std::uint64_t weight_bytes) {
     return free_bytes - static_cast<std::size_t>(weight_bytes);
 }
 
-std::size_t current_free_device_bytes(std::size_t weights_bytes = 0) {
+std::size_t current_free_device_bytes(std::size_t weights_bytes = 0,
+                                      bool wddm_evictable_budget = false,
+                                      std::size_t planned_runtime_bytes = 0) {
     std::size_t free_bytes  = 0;
     std::size_t total_bytes = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
 #if defined(_WIN32)
-    if (weights_bytes > 0) {
+    if (wddm_evictable_budget && weights_bytes > 0) {
         // Allow WDDM to evict background apps down to a 512 MiB non-evictable DWM display floor
         constexpr std::size_t kMinDwmHeadroom = 512ULL * 1024ULL * 1024ULL;
         if (total_bytes > weights_bytes + kMinDwmHeadroom) {
             const std::size_t evictable_free = total_bytes - weights_bytes - kMinDwmHeadroom;
             return std::max(free_bytes, evictable_free);
         }
+    }
+    // The arena already owns the pre-flight budget, so free_bytes understates what the runtime
+    // may still place. Report the budget the arena was actually sized from.
+    if (weights_bytes > 0 && planned_runtime_bytes > 0) {
+        return std::max(free_bytes, planned_runtime_bytes);
     }
 #endif
     return free_bytes;
@@ -104,6 +111,9 @@ template <class Target, class Loaded, class Instance>
 ConstructedTarget construct_registered(const EngineOptions& options, DeviceContext& device,
                                        artifact::Reader& reader, Clock::time_point load_start,
                                        std::string_view target_key) {
+#if defined(_WIN32)
+    core::set_wddm_residency_lock_enabled(options.wddm_evictable_budget);
+#endif
     const auto& identity                          = reader.identity();
     const auto weights_profile                    = Target::resolve_weights(identity);
     const ModelSamplingDefaults sampling_defaults = Target::sampling_defaults(identity.model_id);
@@ -113,7 +123,8 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     auto sequence_planner = Target::make_sequence_planner(device, options, weights_profile);
     const runtime::SequenceCapacityCurve curve = sequence_planner.capacity_curve();
     const std::size_t preflight_runtime_bytes =
-        runtime_bytes_after_planned_weights(load_plan.materialization().device_capacity_bytes);
+        runtime_bytes_after_planned_weights(load_plan.materialization().device_capacity_bytes,
+                                            options.wddm_evictable_budget);
     (void)runtime::resolve_kv_capacity(options.kv_capacity, curve, preflight_runtime_bytes);
 
     auto progress     = artifact_progress(options.load_progress);
@@ -125,7 +136,9 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     device.synchronize();
     const std::size_t weights_capacity_bytes = stats.h2d_bytes;
     runtime::KvCapacityResolution capacity_resolution = runtime::resolve_kv_capacity(
-        options.kv_capacity, curve, current_free_device_bytes(weights_capacity_bytes));
+        options.kv_capacity, curve,
+        current_free_device_bytes(weights_capacity_bytes, options.wddm_evictable_budget,
+                                  preflight_runtime_bytes));
     auto sequence_plan = std::move(sequence_planner).finalize(capacity_resolution.main_page_groups);
     if (sequence_plan.device_reservation_bytes() != capacity_resolution.runtime_reservation_bytes ||
         sequence_plan.kv_capacity() != capacity_resolution.resolved_tokens) {

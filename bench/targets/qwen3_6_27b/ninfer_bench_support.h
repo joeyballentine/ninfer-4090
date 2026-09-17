@@ -25,7 +25,7 @@ inline constexpr int kDefaultRepetitions              = 5;
 inline constexpr int kDefaultWarmup                   = 1;
 inline constexpr std::uint32_t kDefaultPrefillChunk   = 1024;
 inline constexpr std::uint32_t kPrefillChunkAlignment = 128;
-inline constexpr std::uint32_t kMaxMtpDraftTokens     = 5;
+inline constexpr std::uint32_t kMaxMtpDraftTokens     = 15;
 
 enum class TestKind { Prefill, Decode, PrefillDecode };
 
@@ -67,6 +67,7 @@ struct BenchOptions {
     ProposalHead proposal_head     = ProposalHead::Full;
     int device                     = 0;
     bool use_cuda_graph            = true;
+    bool wddm_evictable_budget     = false;
     bool profile_measured          = false;
     OutputFormat output            = OutputFormat::Table;
     std::string output_file;

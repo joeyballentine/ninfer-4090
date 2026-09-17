@@ -434,11 +434,52 @@ int test_reject_unsupported() {
         throws_api([&] { (void)parse_chat_completion_request(function_call, default_limits()); }),
         "deprecated function_call rejected");
 
-    Json rf               = base;
+    Json rf                = base;
     rf["response_format"] = Json{{"type", "json_object"}};
+    const GenerationRequest json_object_req =
+        parse_chat_completion_request(rf, default_limits());
+    failures += check(json_object_req.response_format.mode == ResponseFormatMode::JsonObject,
+                      "json_object response_format parsed");
     failures +=
-        check(throws_api([&] { (void)parse_chat_completion_request(rf, default_limits()); }),
-              "json response_format rejected");
+        check(to_request_options(json_object_req, default_server()).structured_output.mode ==
+                  ninfer::StructuredOutputMode::JsonObject,
+              "json_object response_format reaches Engine options");
+
+    Json rf_schema = base;
+    rf_schema["response_format"] =
+        Json{{"type", "json_schema"},
+             {"json_schema",
+              Json{{"name", "translation_batch"},
+                   {"strict", true},
+                   {"schema", Json{{"type", "object"},
+                                    {"properties", Json{{"translations", Json{{"type", "array"}}}}},
+                                    {"required", Json::array({"translations"})}}}}}};
+    const GenerationRequest json_schema_req =
+        parse_chat_completion_request(rf_schema, default_limits());
+    failures += check(json_schema_req.response_format.mode == ResponseFormatMode::JsonSchema,
+                      "json_schema response_format parsed");
+    failures += check(json_schema_req.response_format.name == "translation_batch",
+                      "json_schema name retained");
+    failures += check(json_schema_req.response_format.strict,
+                      "json_schema strict retained");
+    failures += check(Json::parse(json_schema_req.response_format.schema_json).at("type") ==
+                          "object",
+                      "json_schema body retained");
+    const ninfer::StructuredOutputOptions structured =
+        to_request_options(json_schema_req, default_server()).structured_output;
+    failures += check(structured.mode == ninfer::StructuredOutputMode::JsonSchema,
+                      "json_schema response_format reaches Engine options");
+    failures += check(structured.name == "translation_batch" && structured.strict,
+                      "json_schema Engine metadata retained");
+    failures += check(Json::parse(structured.schema_json).at("type") == "object",
+                      "json_schema Engine body retained");
+
+    Json invalid_rf = base;
+    invalid_rf["response_format"] = Json{{"type", "json_schema"},
+                                          {"json_schema", Json{{"name", "missing_schema"}}}};
+    failures += check(
+        throws_api([&] { (void)parse_chat_completion_request(invalid_rf, default_limits()); }),
+        "json_schema without schema rejected");
 
     Json rf_text               = base;
     rf_text["response_format"] = Json{{"type", "text"}};
@@ -606,6 +647,30 @@ int test_parse_stop_and_max_tokens() {
     req         = parse_chat_completion_request(single, default_limits());
     failures +=
         check(req.stop_strings.size() == 1 && req.stop_strings[0] == "END", "single stop string");
+
+    Json unconstrained_neg = {{"model", "m"},
+                              {"messages", Json::array({Json{{"role", "user"}, {"content", "hi"}}})},
+                              {"max_tokens", -1}};
+    req                    = parse_chat_completion_request(unconstrained_neg, default_limits());
+    failures += check(req.max_tokens == 512 && !req.max_tokens_set, "max_tokens -1 resolves to default limit");
+
+    Json unconstrained_zero = {{"model", "m"},
+                               {"messages", Json::array({Json{{"role", "user"}, {"content", "hi"}}})},
+                               {"max_tokens", 0}};
+    req                     = parse_chat_completion_request(unconstrained_zero, default_limits());
+    failures += check(req.max_tokens == 512 && !req.max_tokens_set, "max_tokens 0 resolves to default limit");
+
+    Json npredict_neg = {{"model", "m"},
+                         {"messages", Json::array({Json{{"role", "user"}, {"content", "hi"}}})},
+                         {"n_predict", -1}};
+    req               = parse_chat_completion_request(npredict_neg, default_limits());
+    failures += check(req.max_tokens == 512 && !req.max_tokens_set, "n_predict -1 resolves to default limit");
+
+    Json npredict_pos = {{"model", "m"},
+                         {"messages", Json::array({Json{{"role", "user"}, {"content", "hi"}}})},
+                         {"n_predict", 128}};
+    req               = parse_chat_completion_request(npredict_pos, default_limits());
+    failures += check(req.max_tokens == 128 && req.max_tokens_set, "n_predict 128 parsed as max_tokens");
     return failures;
 }
 
@@ -838,6 +903,7 @@ int test_models_and_error() {
     failures += check(list.at("data").at(0).at("object") == "model", "models list entry object");
     failures += check(list.at("data").at(0).at("owned_by") == "ninfer", "models list owner");
     failures += check(list.at("data").at(0).at("context_window") == 65536, "models list context");
+    failures += check(list.at("data").at(0).at("max_model_len") == 65536, "models list max_model_len");
     failures += check(list.at("data").at(0).at("max_output_tokens") == 65536, "models list max_output_tokens");
     failures += check(list.at("data").at(0).at("modalities").at("vision") == true,
                       "models list vision modality");
@@ -847,6 +913,7 @@ int test_models_and_error() {
     failures += check(one.at("name") == "qwen3.6-27b", "model name");
     failures += check(one.at("owned_by") == "ninfer", "model owner");
     failures += check(one.at("context_window") == 65536, "model object context");
+    failures += check(one.at("max_model_len") == 65536, "model object max_model_len");
     failures += check(one.at("max_output_tokens") == 65536, "model object max_output_tokens");
     failures += check(one.at("modalities").at("vision") == false, "model object vision modality");
 

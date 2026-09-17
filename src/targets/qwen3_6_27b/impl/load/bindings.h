@@ -24,9 +24,7 @@ inline constexpr std::size_t kGdnLayers           = 48;
 
 struct WeightPlan {
     artifact::ObjectHandle object;
-    artifact::NumericFormat format          = artifact::NumericFormat::BF16;
-    std::uint32_t weight_scale_divisor_bits = 0;
-    std::uint32_t input_scale_divisor_bits  = 0;
+    artifact::NumericFormat format = artifact::NumericFormat::BF16;
 };
 
 struct MlpPlan {
@@ -119,6 +117,10 @@ struct ArtifactLoadPlan {
 
 ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_profile,
                                qwen3_6::StartupFeatures features);
+
+// Stub binding for optional DFlash2 weights to ensure compatibility with
+// new Qwen3.8 artifact releases without materializing them on device.
+void bind_dflash2_stub(artifact::Binder& binder);
 
 struct DensePostMixerPayload {
     Weight gate_up;

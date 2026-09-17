@@ -15,7 +15,9 @@
 #include <wrl/client.h>
 #endif
 
+#include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -79,6 +81,13 @@ struct D3D12AllocationLifetime {
 // Keep lifetime references alive so WDDM residency priority is never dismantled
 static std::vector<D3D12AllocationLifetime> g_d3d12_allocations;
 
+// Upper bound on how long we wait for WDDM to make the heap resident before falling back.
+constexpr DWORD kResidencyWaitTimeoutMs = 10000;
+
+#if defined(_WIN32)
+static std::atomic<bool> g_wddm_residency_lock_enabled{false};
+#endif
+
 bool try_allocate_d3d12_residency_locked(std::size_t capacity_bytes, void*& out_ptr) {
     D3D12AllocationLifetime res;
 
@@ -115,6 +124,25 @@ bool try_allocate_d3d12_residency_locked(std::size_t capacity_bytes, void*& out_
     const std::size_t aligned_size =
         ((capacity_bytes + kD3D12Alignment - 1) / kD3D12Alignment) * kD3D12Alignment;
 
+    DXGI_ADAPTER_DESC1 desc1{};
+    if (SUCCEEDED(res.adapter->GetDesc1(&desc1))) {
+        // Enforce a minimum 512 MiB floor for DWM display scanout
+        constexpr UINT64 kDwmHeadroom = 512ULL * 1024ULL * 1024ULL;
+        const UINT64 max_usable = desc1.DedicatedVideoMemory > kDwmHeadroom
+                                      ? desc1.DedicatedVideoMemory - kDwmHeadroom
+                                      : 0;
+
+        Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter3;
+        if (SUCCEEDED(res.adapter.As(&adapter3))) {
+            DXGI_QUERY_VIDEO_MEMORY_INFO mem_info{};
+            if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mem_info))) {
+                if (mem_info.CurrentUsage + aligned_size > max_usable) {
+                    return false;
+                }
+            }
+        }
+    }
+
     D3D12_HEAP_DESC desc = {};
     desc.SizeInBytes = aligned_size;
     desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -137,6 +165,24 @@ bool try_allocate_d3d12_residency_locked(std::size_t capacity_bytes, void*& out_
         return false;
     }
 
+    // EnqueueMakeResident completes asynchronously and signals the fence once the heap is
+    // actually resident in device memory. Touching the heap before that point is undefined
+    // behaviour: under desktop VRAM contention the pages are not yet backed, so weights
+    // written into the mapping are silently lost and the model emits noise.
+    if (res.fence->GetCompletedValue() < 1) {
+        HANDLE residency_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (residency_event == nullptr) { return false; }
+        if (FAILED(res.fence->SetEventOnCompletion(1, residency_event))) {
+            CloseHandle(residency_event);
+            return false;
+        }
+        const DWORD wait_result = WaitForSingleObject(residency_event, kResidencyWaitTimeoutMs);
+        CloseHandle(residency_event);
+        // A timeout means WDDM could not make the heap resident without going overbudget.
+        // Fall back to cudaMalloc rather than running against non-resident memory.
+        if (wait_result != WAIT_OBJECT_0) { return false; }
+    }
+
     // 3. Create shared handle for CUDA import
     HANDLE shared_handle = nullptr;
     if (FAILED(res.device->CreateSharedHandle(res.heap.Get(), nullptr, GENERIC_ALL, nullptr, &shared_handle))) {
@@ -148,7 +194,10 @@ bool try_allocate_d3d12_residency_locked(std::size_t capacity_bytes, void*& out_
     ext_desc.type = cudaExternalMemoryHandleTypeD3D12Heap;
     ext_desc.handle.win32.handle = shared_handle;
     ext_desc.size = aligned_size;
-    ext_desc.flags = cudaExternalMemoryDedicated;
+    // cudaExternalMemoryDedicated applies to dedicated allocations (D3D12 committed resources /
+    // Vulkan dedicated allocations). A D3D12 heap is a suballocatable range, so the flag must
+    // not be set here.
+    ext_desc.flags = 0;
 
     cudaExternalMemory_t ext_mem = nullptr;
     const cudaError_t import_err = cudaImportExternalMemory(&ext_mem, &ext_desc);
@@ -175,6 +224,50 @@ bool try_allocate_d3d12_residency_locked(std::size_t capacity_bytes, void*& out_
         return false;
     }
 
+    // Verify the mapping actually round-trips before trusting 16 GiB of weights to it.
+    // A D3D12 heap that imported cleanly can still fail to read back correctly, and the
+    // failure mode downstream is silent output corruption rather than an error.
+    {
+        constexpr std::size_t kProbeBytes = 4096;
+        const std::size_t probe = capacity_bytes < kProbeBytes ? capacity_bytes : kProbeBytes;
+        std::vector<unsigned char> pattern(probe);
+        for (std::size_t i = 0; i < probe; ++i) { pattern[i] = static_cast<unsigned char>((i * 31 + 7) & 0xFF); }
+        std::vector<unsigned char> readback(probe, 0);
+
+        bool coherent = false;
+        const std::size_t tail_offset = capacity_bytes > probe ? capacity_bytes - probe : 0;
+        if (cudaMemcpy(dev_ptr, pattern.data(), probe, cudaMemcpyHostToDevice) == cudaSuccess &&
+            cudaMemcpy(static_cast<unsigned char*>(dev_ptr) + tail_offset, pattern.data(), probe,
+                       cudaMemcpyHostToDevice) == cudaSuccess &&
+            cudaDeviceSynchronize() == cudaSuccess &&
+            cudaMemcpy(readback.data(), static_cast<unsigned char*>(dev_ptr) + tail_offset, probe,
+                       cudaMemcpyDeviceToHost) == cudaSuccess) {
+            coherent = std::memcmp(pattern.data(), readback.data(), probe) == 0;
+        }
+
+        if (!coherent) {
+            std::fprintf(stderr,
+                         "[ninfer] D3D12 residency arena failed read-back verification "
+                         "(%zu bytes); falling back to cudaMalloc\n",
+                         capacity_bytes);
+            cudaFree(dev_ptr);
+            cudaDestroyExternalMemory(ext_mem);
+            cudaGetLastError();
+            return false;
+        }
+        cudaMemset(dev_ptr, 0, capacity_bytes);
+    }
+
+    // The final zero-fill above is enqueued on the legacy default stream, which does not order
+    // against non-blocking streams such as DeviceContext::load_stream. Wait for it to land so
+    // stream-ordered weight copies cannot be wiped by the fill (silent all-zero weights).
+    if (cudaDeviceSynchronize() != cudaSuccess) {
+        cudaFree(dev_ptr);
+        cudaDestroyExternalMemory(ext_mem);
+        cudaGetLastError();
+        return false;
+    }
+
     out_ptr = dev_ptr;
     g_d3d12_allocations.push_back(std::move(res));
     return true;
@@ -182,6 +275,18 @@ bool try_allocate_d3d12_residency_locked(std::size_t capacity_bytes, void*& out_
 #endif
 
 } // namespace
+
+#if defined(_WIN32)
+namespace core {
+void set_wddm_residency_lock_enabled(bool enabled) noexcept {
+    g_wddm_residency_lock_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+bool wddm_residency_lock_enabled() noexcept {
+    return g_wddm_residency_lock_enabled.load(std::memory_order_relaxed);
+}
+} // namespace core
+#endif
 
 DeviceBuffer::DeviceBuffer(std::size_t size_bytes) : bytes(size_bytes) {
     if (bytes == 0) { return; }
@@ -266,10 +371,21 @@ DeviceArena::DeviceArena(std::size_t capacity_bytes) {
         throw std::invalid_argument("DeviceArena capacity must be nonzero");
     }
 
+    std::size_t free_bytes  = 0;
+    std::size_t total_bytes = 0;
+    if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess && total_bytes > 0) {
+        if (capacity_bytes > total_bytes) {
+            throw std::runtime_error(
+                "DeviceArena requested capacity (" + std::to_string(capacity_bytes) +
+                " bytes) exceeds total physical device VRAM (" + std::to_string(total_bytes) +
+                " bytes)");
+        }
+    }
+
     void* ptr = nullptr;
 #if defined(_WIN32)
-    if (!try_allocate_d3d12_residency_locked(capacity_bytes, ptr)) {
-        ptr = nullptr;
+    if (core::wddm_residency_lock_enabled()) {
+        if (!try_allocate_d3d12_residency_locked(capacity_bytes, ptr)) { ptr = nullptr; }
     }
 #endif
 
@@ -280,11 +396,22 @@ DeviceArena::DeviceArena(std::size_t capacity_bytes) {
         }
 
 #if defined(_WIN32)
-        // Eagerly touch allocated pages to force WDDM to fault physical VRAM and evict background apps
-        const cudaError_t set_err = cudaMemset(ptr, 0, capacity_bytes);
-        if (set_err != cudaSuccess) {
-            free_device(ptr);
-            throw std::runtime_error(cuda_error_message("cudaMemset failed", set_err));
+        // Eagerly touch allocated pages to force WDDM to fault physical VRAM and evict
+        // background apps. Only safe when this GPU is not also driving the desktop.
+        if (core::wddm_residency_lock_enabled()) {
+            const cudaError_t set_err = cudaMemset(ptr, 0, capacity_bytes);
+            if (set_err != cudaSuccess) {
+                free_device(ptr);
+                throw std::runtime_error(cuda_error_message("cudaMemset failed", set_err));
+            }
+            // The touch is enqueued on the legacy default stream, which does not order against
+            // non-blocking streams such as DeviceContext::load_stream. Wait for it to land so
+            // stream-ordered weight copies cannot be wiped by the fill.
+            const cudaError_t sync_err = cudaDeviceSynchronize();
+            if (sync_err != cudaSuccess) {
+                free_device(ptr);
+                throw std::runtime_error(cuda_error_message("cudaDeviceSynchronize failed", sync_err));
+            }
         }
 #endif
     }

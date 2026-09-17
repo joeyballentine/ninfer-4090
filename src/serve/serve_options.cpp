@@ -96,7 +96,8 @@ std::string serve_usage_text(const char* argv0) {
            "                              reserving " + headroom_mib + " MiB headroom; default: matches --max-context)\n"
            "  --prefill-chunk <N>         Prefill chunk size in tokens (multiple of 128, default: 1024)\n"
            "  --no-cuda-graph             Disable CUDA Graph capture/replay (executes via standard CUDA streams)\n"
-           "  --no-prefix-reuse           Disable KV prefix cache reuse across requests (prefix reuse enabled by default)\n\n"
+           "  --no-prefix-reuse           Disable KV prefix cache reuse across requests (prefix reuse enabled by default)\n"
+           "  --wddm-evictable-budget     Allow aggressive WDDM memory budgeting against total VRAM on dedicated GPUs (Windows only)\n\n"
            "Persistent Prompt Cache (DirectStorage DMA):\n"
            "  --disk-cache / --prompt-cache     Enable persistent multi-turn prompt caching to disk via DirectStorage DMA\n"
            "  --no-disk-cache                   Disable persistent disk prompt cache (default)\n"
@@ -114,8 +115,12 @@ std::string serve_usage_text(const char* argv0) {
            "  --spec <mtp|dflash>         Speculative execution backend (default: none / autoregressive):\n"
            "                                mtp        - Multi-Token Prediction draft heads\n"
            "                                dflash     - Block-parallel draft model (35B-A3B text-only)\n"
-           "  --draft-tokens <N>          Speculative draft tokens per verification round (MTP: 1..5, DFlash: 1..15)\n"
-           "  --lm-head-draft             Reuse base model LM head weights for draft logits projection (requires --spec)\n\n"
+           "  --draft-tokens <N>          Speculative draft tokens per verification round (MTP: 1..15, DFlash: 1..15)\n"
+           "  --lm-head-draft             Draft with the dedicated proposal head instead of the full LM head:\n"
+           "                              a smaller projection over the artifact's draft vocabulary, so each\n"
+           "                              draft step reads far less weight memory. Slightly lower acceptance,\n"
+           "                              markedly faster rounds; verification still uses the full head, so\n"
+           "                              generated text is unchanged (requires --spec)\n\n"
            "Vision & Multimodal:\n"
            "  --vision                    Enable image/video vision encoder and load Vision GPU allocations\n"
            "  --vision-max-tokens <N>     Vision scratchpad token capacity (default: 8192)\n\n"
@@ -247,6 +252,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.use_cuda_graph = false;
         } else if (arg == "--no-prefix-reuse") {
             options.allow_prefix_reuse = false;
+        } else if (arg == "--wddm-evictable-budget") {
+            options.wddm_evictable_budget = true;
         } else if (arg == "--prompt-cache" || arg == "--disk-cache" || arg == "--enable-prompt-cache") {
             options.enable_prompt_cache = true;
         } else if (arg == "--no-prompt-cache" || arg == "--no-disk-cache") {
@@ -338,6 +345,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         if (options.default_max_tokens <= 0) {
             throw std::invalid_argument("--default-max-tokens must be positive");
         }
+    } else {
+        options.default_max_tokens = static_cast<int>(options.max_context);
     }
     return options;
 }
