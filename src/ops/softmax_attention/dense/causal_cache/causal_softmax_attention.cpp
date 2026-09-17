@@ -364,6 +364,16 @@ CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::i
             case KvCacheStorage::Fp8KeyNvfp4Value:
                 prompt_limit = width <= 4 ? 0 : width <= 8 ? 128 : 320;
                 break;
+            // The sm_89 rotated family runs the same INT8 prompt and small-T kernels as
+            // Int8Group64 and differs only in how the key and value planes are coded, so it
+            // inherits the INT8 thresholds. These values are inherited, not measured for these
+            // storages; remeasure before treating them as tuned.
+            case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
+            case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+            case KvCacheStorage::RK4V4E8:
+            case KvCacheStorage::RK2V4E8:
+                prompt_limit = width <= 8 ? 0 : 256;
+                break;
             }
             if (envelope.max_visible_keys <= prompt_limit) return CausalAttentionRoute::Prompt;
         }
