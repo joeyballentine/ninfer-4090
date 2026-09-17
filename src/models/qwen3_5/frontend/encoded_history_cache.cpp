@@ -40,6 +40,12 @@ std::uint32_t checked_frontier(std::size_t value, std::string_view what) {
     return static_cast<std::uint32_t>(value);
 }
 
+bool same_spans(std::span<const text::ByteSpan> lhs, std::span<const text::ByteSpan> rhs) noexcept {
+    return std::equal(
+        lhs.begin(), lhs.end(), rhs.begin(), rhs.end(),
+        [](text::ByteSpan a, text::ByteSpan b) { return a.begin == b.begin && a.end == b.end; });
+}
+
 bool ids_end_with(std::span<const int> ids, std::span<const int> tail) noexcept {
     if (tail.size() > ids.size()) { return false; }
     return std::equal(tail.begin(), tail.end(),
@@ -85,6 +91,17 @@ std::optional<std::size_t> suffix_index(std::span<const std::size_t> list,
 
 } // namespace
 
+std::vector<text::ByteSpan> literal_spans_in(std::span<const text::ByteSpan> spans,
+                                             std::size_t begin, std::size_t end) {
+    std::vector<text::ByteSpan> window;
+    for (const text::ByteSpan span : spans) {
+        const std::size_t lo = std::max(span.begin, begin);
+        const std::size_t hi = std::min(span.end, end);
+        if (lo < hi) { window.push_back(text::ByteSpan{.begin = lo - begin, .end = hi - begin}); }
+    }
+    return window;
+}
+
 bool host_encode_verify_enabled() noexcept {
     if (const char* raw = std::getenv("NINFER_VERIFY_HOST_ENCODE")) {
         return raw[0] != '\0' && std::strcmp(raw, "0") != 0;
@@ -99,7 +116,8 @@ bool host_encode_verify_enabled() noexcept {
 
 std::optional<CopiedCommitted>
 EncodedHistoryCache::copy_longest_prefix(std::string_view full, const Tokenizer& tokenizer,
-                                         std::optional<std::size_t> checkpoint_offset) {
+                                         std::optional<std::size_t> checkpoint_offset,
+                                         std::span<const text::ByteSpan> literal_spans) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::size_t best_index = entries_.size();
     std::size_t best_n     = 0;
@@ -108,7 +126,8 @@ EncodedHistoryCache::copy_longest_prefix(std::string_view full, const Tokenizer&
         const std::size_t n = entry.bytes.size();
         if (n == 0 || n > full.size() || n <= best_n) { continue; }
         if (std::memcmp(entry.bytes.data(), full.data(), n) != 0) { continue; }
-        if (!tokenizer.is_encode_loop_pos(full, n)) { continue; }
+        if (!same_spans(entry.literal_spans, literal_spans_in(literal_spans, 0, n))) { continue; }
+        if (!tokenizer.is_encode_loop_pos(full, n, {}, literal_spans)) { continue; }
         if (checkpoint_offset && *checkpoint_offset < n) { continue; }
         best_index = i;
         best_n     = n;
@@ -121,7 +140,8 @@ EncodedHistoryCache::copy_longest_prefix(std::string_view full, const Tokenizer&
 }
 
 void EncodedHistoryCache::insert_committed(std::string bytes, std::vector<int> ids,
-                                           std::vector<CommittedBoundary> committed_boundaries) {
+                                           std::vector<CommittedBoundary> committed_boundaries,
+                                           std::vector<text::ByteSpan> literal_spans) {
     if (bytes.empty() || ids.empty() || bytes.size() > kHostEncodeCacheMaxBytes ||
         ids.size() > kHostEncodeCacheMaxIds) {
         return;
@@ -131,6 +151,7 @@ void EncodedHistoryCache::insert_committed(std::string bytes, std::vector<int> i
         if (entry.bytes == bytes) {
             entry.ids                  = std::move(ids);
             entry.committed_boundaries = std::move(committed_boundaries);
+            entry.literal_spans        = std::move(literal_spans);
             entry.stamp                = ++clock_;
             return;
         }
@@ -143,12 +164,14 @@ void EncodedHistoryCache::insert_committed(std::string bytes, std::vector<int> i
         entries_[lru] = Entry{.bytes                = std::move(bytes),
                               .ids                  = std::move(ids),
                               .committed_boundaries = std::move(committed_boundaries),
+                              .literal_spans        = std::move(literal_spans),
                               .stamp                = ++clock_};
         return;
     }
     entries_.push_back(Entry{.bytes                = std::move(bytes),
                              .ids                  = std::move(ids),
                              .committed_boundaries = std::move(committed_boundaries),
+                             .literal_spans        = std::move(literal_spans),
                              .stamp                = ++clock_});
 }
 
@@ -189,9 +212,10 @@ try_splice_encoded_chat(const Tokenizer& tokenizer, std::span<const int> committ
                         std::span<const CommittedBoundary> committed_boundaries,
                         std::size_t maximum_tokens) {
     const std::string_view text = rendered.text;
-    if (n > text.size() || !tokenizer.is_encode_loop_pos(text, n)) { return std::nullopt; }
-    if (!rendered.literal_spans.empty() || !rendered.media_placeholders.empty() ||
-        !rendered.media_token_runs.empty()) {
+    if (n > text.size() || !tokenizer.is_encode_loop_pos(text, n, {}, rendered.literal_spans)) {
+        return std::nullopt;
+    }
+    if (!rendered.media_placeholders.empty() || !rendered.media_token_runs.empty()) {
         return std::nullopt;
     }
     const std::size_t committed_count = committed_ids.size();
@@ -212,8 +236,10 @@ try_splice_encoded_chat(const Tokenizer& tokenizer, std::span<const int> committ
         if (boundary >= n) { suffix_boundaries.push_back(boundary - n); }
     }
 
+    const std::vector<text::ByteSpan> suffix_spans =
+        literal_spans_in(rendered.literal_spans, n, text.size());
     const BoundaryEncodedText marked = tokenizer.encode_with_boundaries(
-        text.substr(n), suffix_boundaries, EncodeOptions{.max_tokens = suffix_limit});
+        text.substr(n), suffix_boundaries, EncodeOptions{.max_tokens = suffix_limit}, suffix_spans);
     // The suffix encode hit its token limit, so the spliced prompt exceeds the budget; the
     // cold encode reports the overflow with the context-length diagnostic.
     if (marked.input_ids.size() == suffix_limit) { return std::nullopt; }
@@ -317,11 +343,11 @@ CachedEncodedChat encode_chat_with_cache(const Tokenizer& tokenizer,
                                        ? chat_template.render(messages, options, control)
                                        : committed;
 
-    // The cache only covers plain text renders: media and literal spans make the byte stream
-    // non-re-encodable as a committed/suffix pair.
-    if (!full.text.starts_with(committed.text) || !full.literal_spans.empty() ||
-        !full.media_token_runs.empty() || !full.media_placeholders.empty() ||
-        !committed.literal_spans.empty()) {
+    // The cache only covers plain text renders: media runs make the byte stream
+    // non-re-encodable as a committed/suffix pair. Literal spans are carried through, so the
+    // whole map comes from the full render and its committed window keys the stored entry.
+    if (!full.text.starts_with(committed.text) || !full.media_token_runs.empty() ||
+        !full.media_placeholders.empty()) {
         return CachedEncodedChat{.chat = encode_rendered_chat(tokenizer, full, maximum_tokens),
                                  .starts_in_reasoning = full.starts_in_reasoning};
     }
@@ -331,7 +357,7 @@ CachedEncodedChat encode_chat_with_cache(const Tokenizer& tokenizer,
 
     const std::size_t committed_n = committed.text.size();
     std::optional<CopiedCommitted> hit =
-        cache.copy_longest_prefix(full.text, tokenizer, checkpoint_offset);
+        cache.copy_longest_prefix(full.text, tokenizer, checkpoint_offset, full.literal_spans);
     EncodedChat encoded;
     RenderedEncodeResult full_result;
     bool have_full_result = false;
@@ -366,7 +392,7 @@ CachedEncodedChat encode_chat_with_cache(const Tokenizer& tokenizer,
     // Insert this call's committed prefix so the next turn splices on it.
     if (committed_n > 0 && committed_n <= kHostEncodeCacheMaxBytes &&
         full.text.starts_with(committed.text) &&
-        tokenizer.is_encode_loop_pos(full.text, committed_n)) {
+        tokenizer.is_encode_loop_pos(full.text, committed_n, {}, full.literal_spans)) {
         std::vector<int> committed_ids;
         std::vector<CommittedBoundary> entry_boundaries;
         bool have_entry = false;
@@ -385,9 +411,9 @@ CachedEncodedChat encode_chat_with_cache(const Tokenizer& tokenizer,
                     }
                 }
             }
-            const std::string_view delta = committed.text.substr(hit_n);
-            const BoundaryEncodedText delta_encoded =
-                tokenizer.encode_with_boundaries(delta, delta_list);
+            const std::string_view delta = std::string_view(committed.text).substr(hit_n);
+            const BoundaryEncodedText delta_encoded = tokenizer.encode_with_boundaries(
+                delta, delta_list, {}, literal_spans_in(full.literal_spans, hit_n, committed_n));
             const std::size_t committed_count = hit->ids.size();
             committed_ids.reserve(hit->ids.size() + delta_encoded.input_ids.size());
             committed_ids.insert(committed_ids.end(), hit->ids.begin(), hit->ids.end());
@@ -409,7 +435,13 @@ CachedEncodedChat encode_chat_with_cache(const Tokenizer& tokenizer,
             store_boundaries_sorted(entry_boundaries);
             have_entry = true;
         } else if (have_full_result) {
-            const std::vector<int> tail = tokenizer.encode(full.text.substr(committed_n));
+            const std::string_view suffix = std::string_view(full.text).substr(committed_n);
+            const std::vector<int> tail =
+                tokenizer
+                    .encode_with_boundaries(
+                        suffix, {}, {},
+                        literal_spans_in(full.literal_spans, committed_n, full.text.size()))
+                    .input_ids;
             if (!ids_end_with(encoded.input_ids, tail)) {
                 return CachedEncodedChat{.chat                = std::move(encoded),
                                          .starts_in_reasoning = full.starts_in_reasoning};
@@ -430,7 +462,8 @@ CachedEncodedChat encode_chat_with_cache(const Tokenizer& tokenizer,
         if (have_entry && !committed_ids.empty() &&
             committed_ids.size() <= kHostEncodeCacheMaxIds) {
             cache.insert_committed(committed.text, std::move(committed_ids),
-                                   std::move(entry_boundaries));
+                                   std::move(entry_boundaries),
+                                   literal_spans_in(full.literal_spans, 0, committed_n));
             last_host_encode_observation.inserted = true;
         }
     }

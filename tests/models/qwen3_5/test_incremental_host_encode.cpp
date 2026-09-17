@@ -354,8 +354,20 @@ std::vector<std::uint8_t> gradient_ppm() {
     return ppm;
 }
 
+// The committed prefix ids of a render: the first n bytes encoded under the literal map they
+// carry in that render. The Jinja renderer marks every message content region literal, so the
+// map, not the bytes alone, decides where added tokens are recognized.
+std::vector<int> committed_prefix_ids(const fi::Tokenizer& tokenizer,
+                                      const fi::RenderedChat& rendered, std::size_t n) {
+    return tokenizer
+        .encode_with_boundaries(rendered.text.substr(0, n), {}, {},
+                                fi::literal_spans_in(rendered.literal_spans, 0, n))
+        .input_ids;
+}
+
 // The stored committed-region boundary map for a splice at n: every rendered text boundary
-// below n, encoded against the committed prefix (results are properties of those bytes alone).
+// below n, encoded against the committed prefix (results are properties of those bytes and
+// their literal map alone).
 std::vector<fi::CommittedBoundary> committed_boundaries_for(const fi::Tokenizer& tokenizer,
                                                             const fi::RenderedChat& rendered,
                                                             std::size_t n) {
@@ -368,7 +380,8 @@ std::vector<fi::CommittedBoundary> committed_boundaries_for(const fi::Tokenizer&
     std::vector<fi::CommittedBoundary> result;
     if (kept.empty()) { return result; }
     const fi::BoundaryEncodedText marked =
-        tokenizer.encode_with_boundaries(rendered.text.substr(0, n), kept);
+        tokenizer.encode_with_boundaries(rendered.text.substr(0, n), kept, {},
+                                         fi::literal_spans_in(rendered.literal_spans, 0, n));
     result.reserve(kept.size());
     for (std::size_t i = 0; i < kept.size(); ++i) {
         result.push_back(fi::CommittedBoundary{.offset = kept[i], .result = marked.boundaries[i]});
@@ -549,9 +562,9 @@ int check_splice_matches_cold(const fi::Tokenizer& tokenizer, const fi::Rendered
               (label + ": full does not start with committed").c_str());
     if (failures != 0) { return failures; }
     const std::size_t n = committed.text.size();
-    failures += check(tokenizer.is_encode_loop_pos(full.text, n),
+    failures += check(tokenizer.is_encode_loop_pos(full.text, n, {}, full.literal_spans),
                       (label + ": committed size is not a loop-pos of full").c_str());
-    const std::vector<int> committed_ids = tokenizer.encode(committed.text);
+    const std::vector<int> committed_ids = committed_prefix_ids(tokenizer, full, n);
     const std::vector<fi::CommittedBoundary> committed_boundaries =
         committed_boundaries_for(tokenizer, full, n);
     const auto spliced = fi::try_splice_encoded_chat(tokenizer, committed_ids, full, n,
@@ -833,9 +846,10 @@ int test_committed_boundary_reuse() {
 
     const auto splice_case = [&](std::size_t n, const char* label) {
         const std::string prefix = label;
-        failures += check(tokenizer.is_encode_loop_pos(rendered.text, n),
+        failures += check(tokenizer.is_encode_loop_pos(rendered.text, n, {},
+                                                       rendered.literal_spans),
                           (prefix + ": cut is not a loop-pos").c_str());
-        const std::vector<int> committed_ids = tokenizer.encode(rendered.text.substr(0, n));
+        const std::vector<int> committed_ids = committed_prefix_ids(tokenizer, rendered, n);
         const std::vector<fi::CommittedBoundary> stored =
             committed_boundaries_for(tokenizer, rendered, n);
         const auto spliced =
@@ -1023,21 +1037,23 @@ int test_engine_shaped_cache() {
         frontend, rr2,
         product_input({product_message(ninfer::ChatRole::User, "rr")}, preserve), true,
         "E-H9 ResponseReplay thinking");
-    const std::string rr_committed =
+    const fi::RenderedChat rr_committed =
         thinking_toggle_template()
             .render({chat_message(ninfer::ChatRole::User, "rr")},
                     [&] {
                         fi::ChatRenderOptions options;
                         options.add_generation_prompt = false;
+                        options.preserve_thinking     = true;
                         return options;
-                    }())
-            .text;
+                    }());
     failures += check(
         FrontendFactory::inspect(rr2.prompt).identity.rewrite_checkpoint &&
             FrontendFactory::inspect(rr2.prompt).identity.rewrite_checkpoint->kind ==
                 ninfer::models::qwen3_5::RewriteCheckpointKind::ResponseReplay &&
             FrontendFactory::inspect(rr2.prompt).identity.rewrite_checkpoint->frontier ==
-                fixture_tokenizer().encode(rr_committed).size(),
+                committed_prefix_ids(fixture_tokenizer(), rr_committed,
+                                     rr_committed.text.size())
+                    .size(),
         "E-H9 ResponseReplay frontier is not the committed token count");
     (void)rr;
     (void)tc;
@@ -1306,11 +1322,14 @@ int test_concurrency_and_copy_out() {
             options.preserve_thinking = true;
             return options;
         }());
+    // The lookup carries the render's literal map: an entry stored under a different map over
+    // the same bytes would encode differently, so the map is part of the entry's identity.
     auto copied = evict.copy_longest_prefix(
         planted_full.text, fixture_tokenizer(),
         planted_full.rewrite_checkpoint
             ? std::optional<std::size_t>{planted_full.rewrite_checkpoint->offset}
-            : std::nullopt);
+            : std::nullopt,
+        planted_full.literal_spans);
     failures += check(copied.has_value(), "C3 did not copy the planted prefix");
     for (int i = 0; i < 16; ++i) {
         const std::string text = "evict-" + std::to_string(i) + std::string(32, 'x');

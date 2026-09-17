@@ -142,8 +142,11 @@ public:
     // match position, each post-match position (advanced by content.size()), or text.size()
     // after the leftover ordinary run. Ordinary runs are NFC-normalized per run, so only run
     // delimiters guarantee that a prefix and the suffix re-encode to the same token stream.
+    // `literal_spans` must be the same spans the encode uses: suppressed added-token matches
+    // merge the surrounding ordinary runs, which removes loop positions.
     [[nodiscard]] bool is_encode_loop_pos(std::string_view text, std::size_t n,
-                                          EncodeOptions options = {}) const;
+                                          EncodeOptions options                         = {},
+                                          std::span<const text::ByteSpan> literal_spans = {}) const;
     std::string decode(std::span<const int> ids, DecodeOptions options = {}) const;
     [[nodiscard]] DecodedTokenView decoded_token(int id) const;
     [[nodiscard]] std::string_view decode_token_bytes(int id,
@@ -166,7 +169,8 @@ private:
     // The earliest added-token match at or after `pos`, mirroring encode_with_boundaries:
     // the first candidate in candidate-list order whose content matches.
     [[nodiscard]] std::optional<std::pair<std::size_t, const AddedToken*>>
-    find_leftmost_added(std::string_view text, std::size_t pos) const;
+    find_leftmost_added(std::string_view text, std::size_t pos,
+                        std::span<const text::ByteSpan> literal_spans) const;
 
     std::vector<std::string> decoded_token_bytes_;
     std::vector<bool> valid_token_ids_;

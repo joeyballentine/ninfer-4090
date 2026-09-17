@@ -9,6 +9,7 @@
 #include "models/qwen3_5/frontend/chat_template.h"
 #include "models/qwen3_5/frontend/processor.h"
 #include "models/qwen3_5/frontend/tokenizer.h"
+#include "text/byte_span.h"
 
 #include <ninfer/types.h>
 
@@ -56,17 +57,28 @@ struct CopiedCommitted {
     std::vector<CommittedBoundary> committed_boundaries; // sorted by offset, unique offsets
 };
 
+// The literal spans of `spans` that intersect [begin, end), clipped to that window and
+// rebased to it. Literal spans suppress added-token recognition, so a committed prefix and
+// the suffix that follows it must each be encoded under their own window of the render's map.
+[[nodiscard]] std::vector<text::ByteSpan> literal_spans_in(std::span<const text::ByteSpan> spans,
+                                                           std::size_t begin, std::size_t end);
+
 class EncodedHistoryCache {
 public:
-    // Longest stored committed prefix of `full` that is a legal splice point. An entry whose
-    // committed bytes extend past the current rewrite checkpoint is unusable: the checkpoint
-    // frontier would lie inside the committed region and cannot be reproduced from a suffix.
+    // Longest stored committed prefix of `full` that is a legal splice point. `literal_spans`
+    // is the rendered literal map of `full`: an entry matches only when its own map equals the
+    // window of this one, because identical bytes under different maps encode differently. An
+    // entry whose committed bytes extend past the current rewrite checkpoint is unusable: the
+    // checkpoint frontier would lie inside the committed region and cannot be reproduced from
+    // a suffix.
     [[nodiscard]] std::optional<CopiedCommitted>
     copy_longest_prefix(std::string_view full, const Tokenizer& tokenizer,
-                        std::optional<std::size_t> checkpoint_offset);
+                        std::optional<std::size_t> checkpoint_offset,
+                        std::span<const text::ByteSpan> literal_spans = {});
 
     void insert_committed(std::string bytes, std::vector<int> ids,
-                          std::vector<CommittedBoundary> committed_boundaries);
+                          std::vector<CommittedBoundary> committed_boundaries,
+                          std::vector<text::ByteSpan> literal_spans = {});
     void drop_committed(std::string_view bytes);
     void poison_committed_ids(std::string_view bytes);
     void scramble_committed_bytes(std::string_view bytes);
@@ -77,6 +89,8 @@ private:
         std::string bytes;
         std::vector<int> ids;
         std::vector<CommittedBoundary> committed_boundaries;
+        // Rebased to the committed bytes.
+        std::vector<text::ByteSpan> literal_spans;
         std::uint64_t stamp = 0;
     };
 

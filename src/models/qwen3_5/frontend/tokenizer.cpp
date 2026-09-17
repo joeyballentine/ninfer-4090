@@ -840,13 +840,15 @@ std::vector<int> Tokenizer::encode(std::string_view text, EncodeOptions options)
 }
 
 std::optional<std::pair<std::size_t, const AddedToken*>>
-Tokenizer::find_leftmost_added(std::string_view text, std::size_t pos) const {
+Tokenizer::find_leftmost_added(std::string_view text, std::size_t pos,
+                               std::span<const text::ByteSpan> literal_spans) const {
     for (std::size_t i = pos; i < text.size(); ++i) {
         const auto& candidates = added_token_candidates_[static_cast<unsigned char>(text[i])];
         for (const std::size_t index : candidates) {
             const AddedToken& token = added_tokens_[index];
             if (token.content.size() <= text.size() - i &&
-                text.compare(i, token.content.size(), token.content) == 0) {
+                text.compare(i, token.content.size(), token.content) == 0 &&
+                !text::overlaps(literal_spans, i, i + token.content.size())) {
                 return std::pair<std::size_t, const AddedToken*>{i, &token};
             }
         }
@@ -854,14 +856,14 @@ Tokenizer::find_leftmost_added(std::string_view text, std::size_t pos) const {
     return std::nullopt;
 }
 
-bool Tokenizer::is_encode_loop_pos(std::string_view text, std::size_t n,
-                                   EncodeOptions options) const {
+bool Tokenizer::is_encode_loop_pos(std::string_view text, std::size_t n, EncodeOptions options,
+                                   std::span<const text::ByteSpan> literal_spans) const {
     if (n == 0 || n == text.size()) { return true; }
     if (n > text.size()) { return false; }
     if (!options.parse_added_tokens) { return false; }
     std::size_t pos = 0;
     while (pos < text.size()) {
-        const auto match = find_leftmost_added(text, pos);
+        const auto match = find_leftmost_added(text, pos, literal_spans);
         if (!match) { return false; }
         const std::size_t match_pos = match->first;
         if (match_pos > pos) {
