@@ -56,6 +56,31 @@ commit that added the code.
 Both prefill tests returned 0, not the 77 skip code, so the FP8 prefill routes executed. The
 `--nvfp4-only` and `--k8v4-only` variants skip on sm_89 as intended: those KV kernels are SM120.
 
+### Full sweep
+
+`ctest` runs 132 tests in about 8 minutes. The first sweep failed 7. Five were Windows defects,
+fixed here; 13 skip on sm_89 for SM120 kernels and 13 more for absent optional inputs.
+
+| Test | Cause |
+|---|---|
+| `ninfer_artifact_reader_test` | `CreateFileW` shared reads only, so reopening a held file raised `ERROR_SHARING_VIOLATION` |
+| `ninfer_qwen3_5_loading_test` | same |
+| `ninfer_context_disk_store_test` | same; `PositionalFile::open_direct` opens a second writable handle to the file the constructor holds |
+| `ninfer_qwen3_5_incremental_encode_test` | `_putenv_s` rejects a null value through the invalid-parameter handler, which aborts with `0xC0000409` |
+| `ninfer_chat_templates_test` | `subprocess.run(text=True)` took the cp1252 locale codec for a non-ASCII payload; also needs `jinja2` installed for the interpreter CMake selects |
+
+Two remain, 130 of 132 passing:
+
+* `ninfer_softmax_attention_test`, the four marginal INT8 cases above.
+* `ninfer_resource_manager_test`: "one-step eviction outranked the multi-step preserving reuse
+  closure". This is not a port artifact. The `__uint128_t` replacement in the same file is exact,
+  checked against the 128-bit product over 400,000 random full-width pairs, and the planner sorts
+  with `std::stable_sort` over no unordered container, so its ranking does not vary by platform.
+  The test needs no GPU, so it was reachable throughout development. Run it on Linux to confirm it
+  fails there too, then treat it as a planner bug. One thing to check first: the guidance
+  comparator ranks two candidates relative to a third, `parent`, which is a common way to lose the
+  strict weak ordering `stable_sort` requires.
+
 ### Fixed: the batch suites ran SM120 storages on sm_89
 
 The binary exited `0xC0000409` (`__fastfail`) with no output. Relinking with a 64 MB stack did not
