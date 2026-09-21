@@ -238,6 +238,51 @@ the prerequisite, not the follow-up. Reverse the order of those two items.
 Q4 ones reach 1.45x, and Q5 covers `q5_down` at K=17408, the second-largest bank. Worth a separate
 look at the Q5 codec's decode path.
 
+### Speculative decoding and context depth
+
+Measured on the section 4 artifact with `--kv-dtype int8 --greedy --no-thinking`, a coding prompt
+and 400 new tokens. Plain decode is 47.1 tok/s.
+
+| Draft window | MTP | DFlash2 |
+|---|---|---|
+| K=3 | 133.2 | 126.1 |
+| K=5 | **138.9** | **141.2** |
+| K=7 | 118.1 | 134.1 |
+| K=9 | n/a | 114.4 |
+| K=11 | n/a | 107.7 |
+
+Both peak at K=5, near 3x. Acceptance length keeps climbing with K, 4.93 tok/round for DFlash2 at
+K=11, but the extra draft cost overtakes it past 5. The artifact manifest recommends
+`dflash2_draft_tokens` 7, which measures slower than 5 here.
+
+**MTP above K=7 fails to start.** `--spec mtp --draft-tokens 8` and above abort during startup with
+`cudaErrorGraphExecUpdateFailure (update result 2)`, which is
+`cudaGraphExecUpdateErrorTopologyChanged`. `--no-cuda-graph` runs K=8 and K=15 correctly, and
+DFlash2 runs K=15 with graphs, so the draft window `cc3f5b02` lifted is sound and the defect is in
+the MTP graph path alone. The CLI advertises 1 to 15. Either fix the capture or reject K above 7
+at startup, because the measured optimum is 5 and nothing above 7 is worth reaching.
+
+**Context.** 128k retrieves correctly from `long_niah_128k.json`, 130,048 prompt tokens, 1.60k
+tok/s prefill, 39.2 tok/s decode, KV 4.12 GiB, 20.0 GiB planned. The Q6 embedding is what makes
+the full 131072 capacity fit.
+
+Speculation and 128k do not fit together. Both backends refuse with a budget message.
+`--wddm-evictable-budget` admits MTP at 21.1 GiB and zero free, and decode falls to 14.8 tok/s
+because the runtime is evicting to host memory.
+
+Throughput tracks `planned slack`, not context length. DFlash2 K=5 at 32k leaves 1.60 GiB and runs
+188.9 tok/s; at 64k it leaves 226.6 MiB and runs 41.0 tok/s on the same 8k prompt, with CUDA graphs
+ready in both. Keep roughly a gibibyte of slack. These figures are from a machine whose display
+holds about 3.6 GiB of the card; a headless one has that much more to spend.
+
+Usable combinations on 24 GB:
+
+| Want | Configuration | Decode |
+|---|---|---|
+| Fast coding | 32k context, `--spec dflash2 --draft-tokens 5` | 188.9 tok/s |
+| Balanced | 8k to 16k context, either backend at K=5 | ~140 tok/s |
+| Whole-repository context | 128k, no speculation | 39.2 tok/s |
+
 Quality, on the code domain, using the artifact from section 4:
 
 ```bash
