@@ -275,13 +275,10 @@ Throughput tracks `planned slack`, not context length. DFlash2 K=5 at 32k leaves
 ready in both. Keep roughly a gibibyte of slack. These figures are from a machine whose display
 holds about 3.6 GiB of the card; a headless one has that much more to spend.
 
-Usable combinations on 24 GB:
-
-| Want | Configuration | Decode |
-|---|---|---|
-| Fast coding | 32k context, `--spec dflash2 --draft-tokens 5` | 188.9 tok/s |
-| Balanced | 8k to 16k context, either backend at K=5 | ~140 tok/s |
-| Whole-repository context | 128k, no speculation | 39.2 tok/s |
+The limits above are for `int8` KV. The rotated modes shrink KV enough to run long context with
+speculation: `rk8v4` at 128k and `rk2v4-e8` at 256k, both with MTP, verified through `ninfer-serve`
+with retrieval at 130k and 260k tokens. The [README](../../README.md) holds those configurations
+and the per-mode perplexity table; `rk2v4-e8` costs 3.1% code-domain perplexity, `rk8v4` 0.09%.
 
 Quality, on the code domain, using the artifact from section 4:
 
