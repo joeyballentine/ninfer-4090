@@ -119,6 +119,16 @@ the question stating only the answer format; with the fact removed, the model an
 A cold prompt near the window takes a while: 1 min 22 s at 130k, 2 min 29 s at 199k, 4 min 9 s at
 260k.
 
+On Windows, `tools/serve_4090.ps1` starts the server with one of these profiles, 160k by default.
+Arguments after the named parameters pass through to `ninfer-serve`:
+
+```powershell
+tools\serve_4090.ps1                          # rk4v4-e8, 160k, port 8080
+tools\serve_4090.ps1 -Context 256k -Port 8081 # also 128k, 224k
+tools\serve_4090.ps1 -Context 128k --cors     # extra ninfer-serve flags
+tools\serve_4090.ps1 -Context 224k -DryRun    # print the command only
+```
+
 #### Memory, reuse and the desktop
 
 Keep the `free` figure on the `capacity` startup log line at about 1 GiB or more. Below that,
