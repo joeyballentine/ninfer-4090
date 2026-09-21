@@ -1,14 +1,17 @@
 find_package(CUDAToolkit REQUIRED)
 find_package(Threads REQUIRED)
-if(MSVC)
-  # Windows has no pkg-config; the FFmpeg shared build is unpacked into the repository and
-  # consumed through the same imported target the rest of the tree links.
+# libcurl below is discovered through pkg-config on every platform, so PkgConfig is found before
+# the FFmpeg branch rather than inside it. vcpkg supplies pkgconf and the .pc files on Windows.
+find_package(PkgConfig REQUIRED)
+
+if(MSVC AND EXISTS "${PROJECT_SOURCE_DIR}/ffmpeg/include")
+  # An FFmpeg shared build unpacked into the repository, consumed through the same imported target
+  # the rest of the tree links. Takes precedence over pkg-config when it is present.
   add_library(PkgConfig::FFMPEG INTERFACE IMPORTED)
   target_include_directories(PkgConfig::FFMPEG INTERFACE "${PROJECT_SOURCE_DIR}/ffmpeg/include")
   target_link_directories(PkgConfig::FFMPEG INTERFACE "${PROJECT_SOURCE_DIR}/ffmpeg/lib")
   target_link_libraries(PkgConfig::FFMPEG INTERFACE avformat avcodec avutil swscale swresample)
 else()
-  find_package(PkgConfig REQUIRED)
   pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
     libavformat libavcodec libavutil libswscale)
 endif()

@@ -16,6 +16,11 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+// _umul128 for the 64x64->128 cross product in the guidance comparison below.
+#include <intrin.h>
+#endif
+
 namespace ninfer::runtime {
 
 struct MaterializationCheckpointPolicy {
@@ -924,8 +929,22 @@ private:
                            ? item.estimated_total_ns - parent.estimated_total_ns
                            : 0;
             };
-            const __uint128_t left  = static_cast<__uint128_t>(delta(cost)) * b;
-            const __uint128_t right = static_cast<__uint128_t>(delta(prior)) * a;
+            // Cross-multiply in 128 bits; the u64 products overflow. MSVC has no __uint128_t,
+            // so the halves are compared as a (high, low) pair, which orders lexicographically.
+            const auto wide_product = [](std::uint64_t x, std::uint64_t y) {
+#ifdef _WIN32
+                unsigned __int64 high      = 0;
+                const unsigned __int64 low = _umul128(x, y, &high);
+                return std::pair<std::uint64_t, std::uint64_t>{high, low};
+#else
+                const __uint128_t product = static_cast<__uint128_t>(x) * y;
+                return std::pair<std::uint64_t, std::uint64_t>{
+                    static_cast<std::uint64_t>(product >> 64U),
+                    static_cast<std::uint64_t>(product)};
+#endif
+            };
+            const auto left  = wide_product(delta(cost), b);
+            const auto right = wide_product(delta(prior), a);
             if (left != right) { return left < right; }
         }
         return cost.key() < prior.key();

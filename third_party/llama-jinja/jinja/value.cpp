@@ -5,9 +5,21 @@
 #include <sstream>
 #include <string>
 #include <cctype>
+#include <ctime>
 #include <vector>
 #include <optional>
 #include <algorithm>
+
+namespace {
+// localtime_r is POSIX; MSVC spells the reentrant form localtime_s with the arguments reversed.
+inline bool localtime_to(const std::time_t & time, std::tm & out) {
+#ifdef _WIN32
+    return localtime_s(&out, &time) == 0;
+#else
+    return localtime_r(&time, &out) != nullptr;
+#endif
+}
+}  // namespace
 
 namespace jinja {
 
@@ -272,7 +284,7 @@ const func_builtins& global_builtins() {
              args.ensure_vals<value_string>();
              std::string format = args.get_pos(0)->as_string().str();
              std::tm local{};
-             if (!localtime_r(&args.ctx.current_time, &local)) {
+             if (!localtime_to(args.ctx.current_time, local)) {
                  throw raised_exception("strftime_now: invalid time");
              }
              if (format.empty()) return mk_val<value_string>("");
