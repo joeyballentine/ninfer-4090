@@ -70,28 +70,54 @@ drives the desktop. MTP with the LM-head draft at K=5 is the fastest draft windo
 ```bash
 ./build/apps/ninfer-serve models/qwen3_8_27b_24gb.ninfer \
   --kv-dtype rk8v4 --max-context 131072 --kv-capacity 131072 \
-  --spec mtp --draft-tokens 5 --lm-head-draft
+  --spec mtp --draft-tokens 5 --lm-head-draft \
+  --host-kv-mib 1024 --host-state-slots 2
 ```
 
-Measured with 2.8 GiB of the card held by the Windows desktop: 3.86 GiB runtime, 1.35 GiB free,
-1.49k tok/s prefill, 137 tok/s decode, and a needle retrieved from 130,048 tokens.
+#### Long context, 160k to 256k
 
-#### Long context, 256k
+`rk4v4-e8` stores 4-bit E8 keys and costs 0.32% code-domain perplexity. It holds 160k with room to
+spare and reaches 224k before free memory drops under 1 GiB:
+
+```bash
+./build/apps/ninfer-serve models/qwen3_8_27b_24gb.ninfer \
+  --kv-dtype rk4v4-e8 --max-context 163840 --kv-capacity 163840 \
+  --spec mtp --draft-tokens 5 --lm-head-draft \
+  --host-kv-mib 1024 --host-state-slots 2
+
+./build/apps/ninfer-serve models/qwen3_8_27b_24gb.ninfer \
+  --kv-dtype rk4v4-e8 --max-context 229376 --kv-capacity 229376 \
+  --spec mtp --draft-tokens 5 --lm-head-draft \
+  --host-kv-mib 1024 --host-state-slots 2 --device-state-slots 0 --prefill-chunk 1024
+```
+
+The model's full 262,144-token window needs `rk2v4-e8`, 2-bit E8 keys, at 3.1% code-domain
+perplexity, ten times the cost of `rk4v4-e8`. `rk4v4-e8` at 256k needs 5.2 GiB of runtime and does
+not start. `max_context` above 262,144 is rejected at startup.
 
 ```bash
 ./build/apps/ninfer-serve models/qwen3_8_27b_24gb.ninfer \
   --kv-dtype rk2v4-e8 --max-context 262144 --kv-capacity 262144 \
   --spec mtp --draft-tokens 5 --lm-head-draft \
-  --device-state-slots 0 --prefill-chunk 1024
+  --host-kv-mib 1024 --host-state-slots 2 --device-state-slots 0 --prefill-chunk 1024
 ```
 
-`rk2v4-e8` stores 2-bit E8 keys. It costs 3.1% code-domain perplexity, ten times what `rk4v4-e8`
-costs, and it is the only mode measured that holds the model's full 262,144-token window with MTP
-on 24 GB; `rk4v4-e8` at 256k needs 5.2 GiB of runtime and does not start. `--device-state-slots 0`
-drops the cached device checkpoint, 150 MiB, and `--prefill-chunk 1024` shrinks the prefill
-workspace. Together they leave 1.12 GiB free. Measured: 915 tok/s prefill, so 4 min 45 s for a cold
-260,096-token prompt, 108 tok/s decode, needle retrieved. `max_context` above 262,144 is rejected
-at startup.
+`--device-state-slots 0` drops the cached device checkpoint, 150 MiB, and `--prefill-chunk 1024`
+shrinks the prefill workspace; the two larger configurations need both.
+
+Each configuration retrieved a fact placed at 50 to 65% depth in a prompt near its window, with
+the question stating only the answer format; with the fact removed, the model answers
+`ORCHID=0; COLOR=red`. Measured with 1.8 to 2.8 GiB of the card held by the Windows desktop:
+
+| Configuration | Prompt tokens | Prefill | Decode | Runtime | Free |
+|---|---|---|---|---|---|
+| `rk8v4`, 128k | 130,047 | 1.58k tok/s | 138 tok/s | 3.86 GiB | 1.82 GiB |
+| `rk4v4-e8`, 160k | 130,047 | 1.56k tok/s | 146 tok/s | 3.36 GiB | 2.07 GiB |
+| `rk4v4-e8`, 224k | 199,456 | 1.34k tok/s | 129 tok/s | 4.35 GiB | 1.33 GiB |
+| `rk2v4-e8`, 256k | 260,095 | 1.05k tok/s | 107 tok/s | 3.85 GiB | 1.73 GiB |
+
+A cold prompt near the window takes a while: 1 min 22 s at 130k, 2 min 29 s at 199k, 4 min 9 s at
+260k.
 
 #### Memory, reuse and the desktop
 
@@ -102,10 +128,15 @@ headroom on top of this; pass the capacity explicitly when sizing near the limit
 desktop's share of the card moves with open applications, 1.7 to 3.5 GiB in these measurements,
 so recheck `free` after changing what is open.
 
-Follow-up turns reuse the computed prefix in process: a second turn over 130k tokens restored
-130,041 of them and answered in 262 ms, including with `--device-state-slots 0`. `--prompt-cache`
-persists prefixes to disk across restarts, but it is not used with a speculative backend, so a
-restart pays the full prefill again.
+Follow-up turns in one conversation reuse the computed prefix in process: a second turn over 130k
+tokens restored 130,040 of them and answered in 201 ms, with `--device-state-slots 0` and a 1 GiB
+host cache. `--prompt-cache` persists prefixes to disk across restarts, but it is not used with a
+speculative backend, so a restart pays the full prefill again.
+
+By default the server pins 8 GiB of host KV and 1.15 GiB of host state at startup for its
+context-cache host tier. Windows reports that pinned RAM as shared GPU memory, 9.6 GB. The host
+tier holds checkpoints for switching between conversations; one conversation's follow-up turns
+do not need it. `--host-kv-mib 1024 --host-state-slots 2` cuts it to 1.6 GB.
 
 The embedded web UI is served at `http://127.0.0.1:8080/`; OpenAI clients use
 `/v1/chat/completions` and `/v1/responses`, Anthropic clients `/v1/messages`.

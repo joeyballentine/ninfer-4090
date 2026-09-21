@@ -262,9 +262,17 @@ DFlash2 runs K=15 with graphs, so the draft window `cc3f5b02` lifted is sound an
 the MTP graph path alone. The CLI advertises 1 to 15. Either fix the capture or reject K above 7
 at startup, because the measured optimum is 5 and nothing above 7 is worth reaching.
 
-**Context.** 128k retrieves correctly from `long_niah_128k.json`, 130,048 prompt tokens, 1.60k
-tok/s prefill, 39.2 tok/s decode, KV 4.12 GiB, 20.0 GiB planned. The Q6 embedding is what makes
-the full 131072 capacity fit.
+**Context.** `int8` at 128k runs `long_niah_128k.json`, 130,048 prompt tokens, at 1.60k tok/s
+prefill and 39.2 tok/s decode, KV 4.12 GiB, 20.0 GiB planned. The Q6 embedding is what makes the
+full 131072 capacity fit.
+
+**The `long_niah_*` fixtures do not test retrieval.** Every one ends its question with
+`Return exactly: ORCHID=493817; COLOR=COBALT`, the expected output, so a model can copy it from
+the last line. They show that long prefill runs and the output format holds, not that the needle
+was found. All KV modes, including `rk2v4-e8`, passed them. A corrected prompt that states only the
+format, `Answer in the form ORCHID=<code>; COLOR=<color>`, is answered correctly with the needle
+present and as `ORCHID=0; COLOR=red` with it removed. The fixtures, their `manifest.json` hashes
+and token counts, and `examples/cli/README.md` still carry the flaw.
 
 Speculation and 128k do not fit together. Both backends refuse with a budget message.
 `--wddm-evictable-budget` admits MTP at 21.1 GiB and zero free, and decode falls to 14.8 tok/s
@@ -276,9 +284,10 @@ ready in both. Keep roughly a gibibyte of slack. These figures are from a machin
 holds about 3.6 GiB of the card; a headless one has that much more to spend.
 
 The limits above are for `int8` KV. The rotated modes shrink KV enough to run long context with
-speculation: `rk8v4` at 128k and `rk2v4-e8` at 256k, both with MTP, verified through `ninfer-serve`
-with retrieval at 130k and 260k tokens. The [README](../../README.md) holds those configurations
-and the per-mode perplexity table; `rk2v4-e8` costs 3.1% code-domain perplexity, `rk8v4` 0.09%.
+speculation: `rk8v4` at 128k, `rk4v4-e8` at 160k and 224k, and `rk2v4-e8` at 256k, all with MTP,
+verified through `ninfer-serve` with the corrected retrieval prompt at 130k, 199k and 260k
+tokens. The [README](../../README.md) holds those configurations and the per-mode perplexity
+table; `rk2v4-e8` costs 3.1% code-domain perplexity, `rk4v4-e8` 0.32%, `rk8v4` 0.09%.
 
 Quality, on the code domain, using the artifact from section 4:
 
