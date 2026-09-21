@@ -112,12 +112,18 @@ void PositionalFile::require_open() const {
 
 #if defined(_WIN32)
 
+// POSIX descriptors place no lock on the file, and the rest of the tree assumes that. Two of the
+// assumptions are load-bearing here: open_direct() opens a second writable handle to the file this
+// one already holds, and callers replace or delete a store while a handle is alive. FILE_SHARE_READ
+// alone fails both with ERROR_SHARING_VIOLATION.
+constexpr DWORD kShareAll = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+
 PositionalFile::PositionalFile(std::filesystem::path path, FileMode mode, FileAccess access)
     : path_(std::move(path)), access_(access) {
     const DWORD desired =
         access == FileAccess::ReadWrite ? (GENERIC_READ | GENERIC_WRITE) : GENERIC_READ;
     const DWORD disposition = mode == FileMode::CreateOrOpen ? OPEN_ALWAYS : OPEN_EXISTING;
-    handle_ = ::CreateFileW(path_.c_str(), desired, FILE_SHARE_READ, nullptr, disposition,
+    handle_ = ::CreateFileW(path_.c_str(), desired, kShareAll, nullptr, disposition,
                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
     if (handle_ == INVALID_HANDLE_VALUE) {
         handle_ = nullptr;
@@ -146,7 +152,7 @@ void PositionalFile::open_direct() const {
     if (direct_handle_ != nullptr || direct_unavailable_) { return; }
     const DWORD desired =
         access_ == FileAccess::ReadWrite ? (GENERIC_READ | GENERIC_WRITE) : GENERIC_READ;
-    void* opened = ::CreateFileW(path_.c_str(), desired, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+    void* opened = ::CreateFileW(path_.c_str(), desired, kShareAll, nullptr, OPEN_EXISTING,
                                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING |
                                      FILE_FLAG_WRITE_THROUGH | FILE_FLAG_OVERLAPPED,
                                  nullptr);

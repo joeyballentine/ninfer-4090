@@ -36,8 +36,11 @@ namespace {
 }
 
 void* open_handle(const std::filesystem::path& path, DWORD flags) {
-    void* const handle = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                       OPEN_EXISTING, flags, nullptr);
+    // POSIX descriptors place no lock on the file. Sharing only reads would keep an open artifact
+    // from being replaced or deleted for as long as the Engine holds it.
+    constexpr DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    void* const handle =
+        ::CreateFileW(path.c_str(), GENERIC_READ, share, nullptr, OPEN_EXISTING, flags, nullptr);
     return handle == INVALID_HANDLE_VALUE ? nullptr : handle;
 }
 
