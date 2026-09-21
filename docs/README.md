@@ -59,6 +59,7 @@ other references own narrower contracts:
 | [Linear benchmark](maintainer/linear-benchmark.md) | pure Linear measurement, metrics and suites |
 | [Linear tuning and reports](maintainer/linear-tuning.md) | tuning ranges, priority points, dispatch tradeoffs and final performance report format |
 | [Ada FP8 prefill](maintainer/ada-fp8-prefill.md) | sm_89 E4M3 prefill routes of the groupwise formats: exactness, activation error model, admission, go/no-go |
+| [RTX 4090 hardware validation](maintainer/hardware-validation.md) | the sm_89 branch's unexecuted GPU tests, 24 GB reconversion and measurements, in order |
 
 Model cards contain official artifact facts and source provenance. The
 [conversion guide](weight-conversion.md) is the entry point for making an artifact. Exact config
