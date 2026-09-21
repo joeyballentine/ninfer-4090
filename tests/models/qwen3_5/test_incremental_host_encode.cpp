@@ -81,10 +81,13 @@ Frontend make_frontend(const FrontendResources& source) {
 
 inline constexpr std::size_t kNoTokenLimit = std::numeric_limits<std::size_t>::max();
 
-// setenv/unsetenv are not declared by this toolchain's C++ headers; _putenv_s (value nullptr
-// removes) is the CRT-internal equivalent and is visible to getenv.
+// setenv/unsetenv are not declared by this toolchain's C++ headers; _putenv_s is the CRT
+// equivalent and is visible to getenv. It removes a variable when the value is the empty string,
+// and rejects a null value through the invalid-parameter handler, which terminates the process.
 #if defined(_WIN32)
-void set_test_env(const char* name, const char* value) { _putenv_s(name, value); }
+void set_test_env(const char* name, const char* value) {
+    _putenv_s(name, value == nullptr ? "" : value);
+}
 #else
 void set_test_env(const char* name, const char* value) {
     if (value == nullptr) { unsetenv(name); }

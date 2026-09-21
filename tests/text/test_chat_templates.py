@@ -252,9 +252,13 @@ class ChatTemplates(unittest.TestCase):
             dict(messages=[message("system", "no user")], add_generation_prompt=True),
         ]
         cases = [(name, context) for name in SOURCES for context in contexts]
+        # The payload carries non-ASCII template text and ensure_ascii=False keeps it that way,
+        # so the pipes are named explicitly. text=True alone picks the locale codec, which is
+        # cp1252 on Windows and cannot encode it.
         result = subprocess.run(
             [str(RENDERER), "--render"],
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=True,
             input="".join(
