@@ -2497,12 +2497,23 @@ int run_quantized_batch_cases(KvCacheStorage storage, std::uint32_t seed) {
     return failures;
 }
 
+// Nvfp4Group16 and Fp8KeyNvfp4Value run SM120 (Blackwell) kernels; the sm_89 build links stubs.
+// run_nvfp4_cases, run_k8v4_cases and the --nvfp4-only / --k8v4-only entry points already exclude
+// them on sm_89, and the batch suites below carry the same exclusion.
+constexpr std::array kBatchStorages{
+    KvCacheStorage::BFloat16,
+    KvCacheStorage::Int8Group64,
+    KvCacheStorage::Fp8E4M3Row256,
+#if !defined(NINFER_SM89)
+    KvCacheStorage::Nvfp4Group16,
+    KvCacheStorage::Fp8KeyNvfp4Value,
+#endif
+};
+
 int run_dflash2_cases() {
     constexpr int order[]{7, 0, 4, 2, 6, 1, 5, 3};
     int failures = 0;
-    for (auto storage :
-         {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Fp8E4M3Row256,
-          KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value}) {
+    for (auto storage : kBatchStorages) {
         const auto run = [&](int width, int batch, int base, bool graph) {
             BatchAttentionCase c{width,
                                  {},
@@ -2544,9 +2555,7 @@ int run_dflash2_cases() {
 
 int run_batch_cases() {
     int failures = 0;
-    for (auto storage :
-         {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Fp8E4M3Row256,
-          KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value}) {
+    for (auto storage : kBatchStorages) {
         failures += run_batch_case(kGeometries[0], storage,
                                    {16, {0}, {0}, {0}, MappingPattern::Fragmented, 1501u});
         failures += run_batch_case(kGeometries[0], storage,
