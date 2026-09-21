@@ -3,8 +3,6 @@
 
 #include <spdlog/logger.h>
 
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -15,38 +13,70 @@
 #include <stdexcept>
 #include <string>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace {
+
+// The MSVC CRT spells these POSIX calls with a leading underscore, and _pipe carries a buffer
+// size and a text/binary mode the POSIX signature does not. Wrapped rather than #defined so the
+// standard headers above keep their own members named read and close.
+#ifdef _WIN32
+constexpr int kStderrFileno = 2;
+inline int os_pipe(int fds[2]) { return ::_pipe(fds, 65536, _O_BINARY); }
+inline int os_dup(int fd) { return ::_dup(fd); }
+inline int os_dup2(int from, int to) { return ::_dup2(from, to); }
+inline int os_close(int fd) { return ::_close(fd); }
+inline int os_read(int fd, void* buffer, std::size_t count) {
+    return ::_read(fd, buffer, static_cast<unsigned int>(count));
+}
+#else
+constexpr int kStderrFileno = STDERR_FILENO;
+inline int os_pipe(int fds[2]) { return ::pipe(fds); }
+inline int os_dup(int fd) { return ::dup(fd); }
+inline int os_dup2(int from, int to) { return ::dup2(from, to); }
+inline int os_close(int fd) { return ::close(fd); }
+inline ssize_t os_read(int fd, void* buffer, std::size_t count) {
+    return ::read(fd, buffer, count);
+}
+#endif
 
 class StderrCapture {
 public:
     StderrCapture() {
-        if (::pipe(pipe_) != 0) { throw std::runtime_error(std::strerror(errno)); }
-        saved_ = ::dup(STDERR_FILENO);
-        if (saved_ < 0 || ::dup2(pipe_[1], STDERR_FILENO) < 0) {
+        if (os_pipe(pipe_) != 0) { throw std::runtime_error(std::strerror(errno)); }
+        saved_ = os_dup(kStderrFileno);
+        if (saved_ < 0 || os_dup2(pipe_[1], kStderrFileno) < 0) {
             throw std::runtime_error(std::strerror(errno));
         }
-        ::close(pipe_[1]);
+        os_close(pipe_[1]);
         pipe_[1] = -1;
     }
 
     ~StderrCapture() {
         if (saved_ >= 0) {
-            (void)::dup2(saved_, STDERR_FILENO);
-            ::close(saved_);
+            (void)os_dup2(saved_, kStderrFileno);
+            os_close(saved_);
         }
-        if (pipe_[0] >= 0) { ::close(pipe_[0]); }
+        if (pipe_[0] >= 0) { os_close(pipe_[0]); }
     }
 
     std::string finish() {
         std::fflush(stderr);
-        if (::dup2(saved_, STDERR_FILENO) < 0) { throw std::runtime_error(std::strerror(errno)); }
-        ::close(saved_);
+        if (os_dup2(saved_, kStderrFileno) < 0) {
+            throw std::runtime_error(std::strerror(errno));
+        }
+        os_close(saved_);
         saved_ = -1;
 
         std::string output;
         std::array<char, 4096> buffer{};
         for (;;) {
-            const ssize_t count = ::read(pipe_[0], buffer.data(), buffer.size());
+            const auto count = os_read(pipe_[0], buffer.data(), buffer.size());
             if (count == 0) { break; }
             if (count < 0) {
                 if (errno == EINTR) { continue; }
@@ -54,7 +84,7 @@ public:
             }
             output.append(buffer.data(), static_cast<std::size_t>(count));
         }
-        ::close(pipe_[0]);
+        os_close(pipe_[0]);
         pipe_[0] = -1;
         return output;
     }

@@ -11,9 +11,12 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace ninfer::test::artifact_fixture {
@@ -46,13 +49,21 @@ struct Fixture {
     std::vector<std::byte> payload;
 
     Fixture() : payload(1344) {
-        auto pattern = (std::filesystem::temp_directory_path() / "ninfer-artifact-XXXXXX").string();
-        std::vector<char> buffer(pattern.begin(), pattern.end());
-        buffer.push_back('\0');
-        const char* path = ::mkdtemp(buffer.data());
-        if (!path) { throw std::runtime_error("cannot create fixture directory"); }
-        directory = path;
-        entry     = directory / "model.ninfer";
+        // Portable stand-in for mkdtemp, which the MSVC CRT does not provide. create_directory
+        // reports false when the name already exists, so the retry loop stays race-free.
+        std::random_device entropy;
+        const auto base = std::filesystem::temp_directory_path();
+        for (int attempt = 0; directory.empty(); ++attempt) {
+            if (attempt == 64) { throw std::runtime_error("cannot create fixture directory"); }
+            std::ostringstream name;
+            name << "ninfer-artifact-" << std::hex << entropy() << entropy();
+            const auto candidate = base / name.str();
+            std::error_code error;
+            if (std::filesystem::create_directory(candidate, error) && !error) {
+                directory = candidate;
+            }
+        }
+        entry = directory / "model.ninfer";
         root      = {
             {"components",
                   {{"text", {{"config", Json::object()}, {"resources", {{"tokenizer.json", "asset"}}}}},

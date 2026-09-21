@@ -11,9 +11,11 @@
 #include <map>
 #include <optional>
 
+#ifndef NINFER_NO_LINK_WRAP
 namespace ninfer::test {
 void materialization_cuda_errors(DeviceContext& device);
 }
+#endif
 
 namespace {
 
@@ -229,7 +231,11 @@ int main(int argc, char** argv) {
         }
         materialization(device);
         failure_and_host_only(device);
+#ifndef NINFER_NO_LINK_WRAP
         ninfer::test::materialization_cuda_errors(device);
+#else
+        std::cout << "cuda error injection skipped: no linker --wrap on this toolchain\n";
+#endif
         staging_reuse(device);
         std::cout << "artifact materialization checks passed\n";
         return 0;

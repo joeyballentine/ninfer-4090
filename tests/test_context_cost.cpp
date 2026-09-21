@@ -13,7 +13,13 @@
 #include <stdexcept>
 #include <string>
 
+#ifdef _WIN32
+// <process.h> provides _getpid; the POSIX spelling below is mapped to it.
+#include <process.h>
+#define getpid _getpid
+#else
 #include <unistd.h>
+#endif
 
 namespace {
 
