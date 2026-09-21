@@ -31,7 +31,7 @@ _ROOT = str(Path(__file__).resolve().parents[1])
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from tools.artifact.file_io import IO_CHUNK_BYTES, Writeback
+from tools.artifact.file_io import IO_CHUNK_BYTES, Writeback, pwrite
 from tools.artifact.formats import QUANT_FORMATS
 from tools.artifact.framing import HEADER, MAGIC, PART_MAGIC, PAYLOAD_ALIGNMENT
 from tools.artifact.reader import Artifact
@@ -141,7 +141,7 @@ def segmentation_limit(source: Artifact, override: int | None) -> int:
 def _write(fd: int, offset: int, data: bytes, writeback: Writeback) -> None:
     view = memoryview(data).cast("B")
     while view:
-        count = os.pwrite(fd, view[:IO_CHUNK_BYTES], offset)
+        count = pwrite(fd, view[:IO_CHUNK_BYTES], offset)
         if count <= 0:
             raise OSError(f"short write at file offset {offset}")
         view = view[count:]
